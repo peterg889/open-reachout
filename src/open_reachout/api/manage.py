@@ -35,10 +35,10 @@ def _check_manage(request: Request) -> str:
 
 
 def _form(action: str, label: str, token: str, danger: bool = False) -> str:
-    style = "background:#fee" if danger else ""
+    cls = " class='danger'" if danger else ""
     return (
         f"<form method='post' action='{_e(action)}?manage_token={_e(token)}' "
-        f"style='display:inline'><button style='{style}'>{_e(label)}</button></form>"
+        f"style='display:inline'><button{cls}>{_e(label)}</button></form>"
     )
 
 
@@ -53,10 +53,13 @@ def build_manage_router(engine: Engine) -> APIRouter:
             escs = escalations.list_open(conn)
             held = sendpath.list_pending_review(conn)
             tasks = human_tasks.list_pending(conn)
-        rows: list[str] = ["<h2>Proposals</h2>"]
+        rows: list[str] = [
+            "<p class='crumb'><a href='/dashboard'>overview</a> / queues</p>",
+            "<h2>Proposals</h2>",
+        ]
         for p in props:
             flag = (
-                " <strong style='color:#b00'>[rebalancing flag]</strong>"
+                " <span class='state exit'>rebalancing flag</span>"
                 if p.kind == "rebalance" else ""
             )
             rows.append(
