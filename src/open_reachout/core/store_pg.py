@@ -193,11 +193,11 @@ class PgGateStore:
         claimed = self.conn.execute(
             text(
                 """
-                UPDATE touches SET status = 'claimed', claimed_at = now()
+                UPDATE touches SET status = 'claimed', claimed_at = now(), mailbox = :m
                 WHERE id = CAST(:i AS uuid) AND status = 'drafted'
                 """
             ),
-            {"i": touch.touch_id},
+            {"i": touch.touch_id, "m": mailbox},
         ).rowcount
         if not claimed:
             raise RuntimeError(f"touch {touch.touch_id} not in 'drafted' state")
@@ -233,4 +233,32 @@ class PgGateStore:
                 """
             ),
             {"i": touch.touch_id},
+        )
+
+    # -- dispatch reissue (spec 7.4): re-verify the absolute gates at load -----
+    def load_claimed(self, touch_id: str):
+        from open_reachout.core.gatekeeper import ClaimedSnapshot
+
+        row = self.conn.execute(
+            text(
+                """
+                SELECT t.slug, tc.mailbox, tc.content_hash, p.email_canonical
+                FROM touches tc
+                JOIN prospects p ON p.id = tc.prospect_id
+                JOIN tenants t ON t.id = p.tenant_id
+                WHERE tc.id = CAST(:i AS uuid) AND tc.status = 'claimed'
+                  AND tc.mailbox IS NOT NULL
+                """
+            ),
+            {"i": touch_id},
+        ).fetchone()
+        if row is None:
+            return None
+        tenant, mailbox, content_hash, email = row
+        if self.halted_scopes(tenant):
+            return None
+        if email is None or self.is_suppressed(email, tenant):
+            return None
+        return ClaimedSnapshot(
+            touch_id=touch_id, tenant=tenant, mailbox=mailbox, content_sha256=content_hash
         )

@@ -142,8 +142,59 @@ def dry_run(
 
 
 @app.command()
-def run() -> None:
-    _not_yet("M2")
+def run(
+    config_dir: Path = typer.Argument(  # noqa: B008 — typer idiom
+        ..., help="directory of tenant dirs (validator contexts come from config)"
+    ),
+    once: bool = typer.Option(False, "--once", help="drain pending jobs and exit"),
+    llm: str = typer.Option("fake", help="fake | gemini | anthropic"),
+    provider: str = typer.Option("fake", help="fake (smartlead adapter lands with M2 spike)"),
+) -> None:
+    """Run the worker: control, classify, and deliver queues (spec 6)."""
+    from open_reachout.adapters.fakes import FakeSendingProvider
+    from open_reachout.core import dryrun, events, sendpath
+    from open_reachout.core.db import engine_from_env
+    from open_reachout.core.worker import Worker
+
+    if provider != "fake":
+        typer.secho("only the fake provider is wired yet (Smartlead spike pending)", fg="red")
+        raise typer.Exit(2)
+
+    contexts = {}
+    senders = {}
+    for f in sorted(config_dir.rglob("tenant.yaml")):
+        cfg = load_tenant(f)
+        contexts[cfg.tenant] = dryrun.validator_context(cfg)
+        senders[cfg.tenant] = cfg.brief.about_us.identity.sender
+
+    backend: object
+    if llm == "gemini":
+        from open_reachout.adapters.llm.gemini_backend import GeminiBackend
+
+        backend = GeminiBackend()
+    elif llm == "anthropic":
+        from open_reachout.adapters.llm.anthropic_backend import AnthropicBackend
+
+        backend = AnthropicBackend()
+    else:
+        first = next(iter(contexts))
+        backend = dryrun.ScriptedLLM(contexts[first], senders[first])
+
+    sending = FakeSendingProvider()
+    worker = Worker(
+        engine_from_env(),
+        handlers={
+            "control": events.make_control_handler(sending),
+            "classify": events.make_classify_handler(backend),  # type: ignore[arg-type]
+            "deliver": sendpath.make_deliver_handler(sending, contexts),
+        },
+    )
+    if once:
+        processed = worker.drain()
+        typer.secho(f"worker: processed {processed} job(s), queues idle", fg="green")
+        return
+    typer.secho("worker: running (ctrl-c to stop)", fg="green")
+    worker.run_forever()
 
 
 @app.command()

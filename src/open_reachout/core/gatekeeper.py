@@ -182,3 +182,44 @@ def _refuse(
 ) -> Refusal:
     results[gate] = f"refused:{reason}"
     return Refusal(reason, detail=detail or gate, terminal=terminal)
+
+
+@dataclass(frozen=True)
+class ClaimedSnapshot:
+    """What a DispatchStore returns for a touch that is verifiably claimed
+    and still sendable (halt and suppression re-checked at load time)."""
+
+    touch_id: str
+    tenant: str
+    mailbox: str
+    content_sha256: str
+
+
+class DispatchStore(Protocol):
+    def load_claimed(self, touch_id: str) -> ClaimedSnapshot | None: ...
+
+
+def reissue(store: DispatchStore, touch_id: str) -> ClaimedTouch | Refusal:
+    """Reconstruct a ClaimedTouch for dispatch retries (spec 7.4).
+
+    Construction stays inside this module (I-1): the store may only return a
+    snapshot for a touch whose DB status is 'claimed' AND that passes the
+    absolute gates (halt, suppression) again at load time — reactive
+    enforcement between claim and dispatch.
+    """
+    try:
+        snapshot = store.load_claimed(touch_id)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        return Refusal(RefusalReason.INTERNAL, detail=repr(exc), terminal=False)
+    if snapshot is None:
+        return Refusal(RefusalReason.VALIDATION, detail="not claimed/sendable", terminal=True)
+    _claim_guard.token = _CONSTRUCTION_TOKEN
+    try:
+        return ClaimedTouch(
+            touch_id=snapshot.touch_id,
+            tenant=snapshot.tenant,
+            mailbox=snapshot.mailbox,
+            content_sha256=snapshot.content_sha256,
+        )
+    finally:
+        _claim_guard.token = None

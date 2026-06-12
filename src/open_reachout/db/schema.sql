@@ -230,3 +230,6 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   warmup_complete boolean NOT NULL DEFAULT false,
   daily_cap      int NOT NULL DEFAULT 25
 );
+
+-- M2: mailbox assignment recorded at claim time (needed for dispatch retries).
+ALTER TABLE touches ADD COLUMN IF NOT EXISTS mailbox text;
