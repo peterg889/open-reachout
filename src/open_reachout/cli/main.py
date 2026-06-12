@@ -240,7 +240,9 @@ def run(
     ),
     once: bool = typer.Option(False, "--once", help="drain pending jobs and exit"),
     llm: str = typer.Option("fake", help="fake | gemini | anthropic"),
-    provider: str = typer.Option("fake", help="fake (smartlead adapter lands with M2 spike)"),
+    provider: str = typer.Option(
+        "fake", help="fake | smtp (send from your own domain via OR_SMTP_MAILBOXES)"
+    ),
 ) -> None:
     """Run the worker: control, classify, and deliver queues (spec 6)."""
     from open_reachout.adapters.fakes import FakeSendingProvider
@@ -248,8 +250,23 @@ def run(
     from open_reachout.core.db import engine_from_env
     from open_reachout.core.worker import Worker
 
-    if provider != "fake":
-        typer.secho("only the fake provider is wired yet (Smartlead spike pending)", fg="red")
+    if provider == "smtp":
+        from open_reachout.adapters.sending.smtp import SmtpSendingProvider, mailboxes_from_env
+
+        mailboxes = mailboxes_from_env()
+        if not mailboxes:
+            typer.secho("set OR_SMTP_MAILBOXES (JSON) to send from your own domain", fg="red")
+            raise typer.Exit(2)
+        sending: object = SmtpSendingProvider(mailboxes)
+        typer.secho(
+            f"sending via own-domain SMTP from {len(mailboxes)} mailbox(es); inbound "
+            "replies/bounces arrive by IMAP polling (reachout poll)",
+            fg="green",
+        )
+    elif provider == "fake":
+        sending = FakeSendingProvider()
+    else:
+        typer.secho(f"unknown provider {provider!r}", fg="red")
         raise typer.Exit(2)
 
     contexts = {}
@@ -272,13 +289,12 @@ def run(
         first = next(iter(contexts))
         backend = dryrun.ScriptedLLM(contexts[first], senders[first])
 
-    sending = FakeSendingProvider()
     worker = Worker(
         engine_from_env(),
         handlers={
-            "control": events.make_control_handler(sending),
+            "control": events.make_control_handler(sending),  # type: ignore[arg-type]
             "classify": events.make_classify_handler(backend),  # type: ignore[arg-type]
-            "deliver": sendpath.make_deliver_handler(sending, contexts),
+            "deliver": sendpath.make_deliver_handler(sending, contexts),  # type: ignore[arg-type]
         },
     )
     if once:

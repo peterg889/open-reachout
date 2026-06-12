@@ -24,15 +24,11 @@ from open_reachout.stats.persistence import record_guardrail, record_success
 PROVIDER_NAME = "provider"  # single-provider deployments; adapter name otherwise
 
 
-def ingest_webhook(
-    conn: Connection, provider: SendingProvider, payload: bytes, signature: str
-) -> int:
-    """Verify, dedupe, and act on a webhook. Returns events newly processed.
-
-    Raises WebhookVerificationError on bad signatures (gate 13): drop + alert
-    is the caller's job; nothing unverified reaches this far.
-    """
-    events = provider.parse_webhook(payload, signature)
+def ingest_events(conn: Connection, events: list[ProviderEvent]) -> int:
+    """Dedupe and act on parsed provider events; returns events newly
+    processed. Shared by webhook ingestion (Smartlead/Instantly) and IMAP
+    inbound polling (own-domain SMTP) — both produce the same ProviderEvent
+    stream, so deterministic handling runs identically."""
     processed = 0
     for event in events:
         inserted = conn.execute(
@@ -52,6 +48,17 @@ def ingest_webhook(
         _act(conn, event)
         processed += 1
     return processed
+
+
+def ingest_webhook(
+    conn: Connection, provider: SendingProvider, payload: bytes, signature: str
+) -> int:
+    """Verify, dedupe, and act on a webhook. Returns events newly processed.
+
+    Raises WebhookVerificationError on bad signatures (gate 13): drop + alert
+    is the caller's job; nothing unverified reaches this far.
+    """
+    return ingest_events(conn, provider.parse_webhook(payload, signature))
 
 
 def _prospect_for(

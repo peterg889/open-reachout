@@ -260,5 +260,6 @@ class PgGateStore:
         if email is None or self.is_suppressed(email, tenant):
             return None
         return ClaimedSnapshot(
-            touch_id=touch_id, tenant=tenant, mailbox=mailbox, content_sha256=content_hash
+            touch_id=touch_id, tenant=tenant, mailbox=mailbox,
+            content_sha256=content_hash, recipient=email,
         )

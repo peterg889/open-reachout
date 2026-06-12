@@ -25,7 +25,11 @@ aspirational: the safety and compliance layer lives in the core and is
 
 ## What we deliberately do not ship
 
-- SMTP sending (use a cold-email provider whose abuse policies stay in the loop)
+- Sending through shared transactional ESPs (SendGrid, Mailgun, Amazon SES) —
+  their AUPs ban cold email and one bad tenant poisons the shared pool.
+  (Sending from **your own authenticated domain** over SMTP, or through a
+  managed cold-email provider, is supported — that's your own reputation on
+  the line, which is the point.)
 - Contact databases or purchased lists (imports without provenance are rejected)
 - Spintax, open-tracking cloaks, suppression workarounds, deliverability
   evasion of any kind — PRs adding these will be declined

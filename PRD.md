@@ -38,7 +38,7 @@ Steady state, the human touchpoints are: the weekly digest, the escalation queue
 **What it is not:**
 - Not a hosted SaaS (though the license must not preclude anyone offering one — see §9, OSS-1/OSS-8).
 - Not a contact database. It ships zero data; it ships *adapters* to data you're entitled to use.
-- Not a sending infrastructure. It drives Smartlead/Instantly/etc. via their APIs; it never speaks SMTP itself in v1.
+- Not shared sending infrastructure. It sends from the operator's **own authenticated domain** (direct SMTP) or drives a managed cold-email provider (Smartlead/Instantly); it never runs a shared transactional pool or rotates reputation across operators.
 - Not a spam cannon. Volume caps, frequency caps, suppression, and CAN-SPAM validators live in the core and cannot be disabled by config or plugins (§8.7, §10).
 
 **Primary user ("Operator"):** a technical founder/developer who can edit YAML, run a CLI, and read a weekly digest. Deployments must stay operable by a team of one to three people without a dedicated SRE (§8.9). Secondary: contributors writing adapters for new data sources and providers.
@@ -63,7 +63,7 @@ Steady state, the human touchpoints are: the weekly digest, the escalation queue
 - NG3: Building marketplaces/CRMs. Conversion ends at an attributed webhook/API call into *your* app (§7.8).
 - NG4: Non-US compliance regimes (CASL, GDPR/PECR). v1 targets US CAN-SPAM; the compliance module is regime-pluggable. (Data-subject deletion ships in v1 anyway — it's table stakes regardless of regime, §7.7.)
 - NG5: ToS-prohibited scraping. A hard-coded source denylist that config can extend but never shrink.
-- NG6: Owning deliverability primitives (SMTP, warmup networks, IP pools). Always delegated to sending providers.
+- NG6 *(revised)*: Not running a **shared sending pool** or warmup/IP-rotation network. Sending is either through the operator's **own authenticated domain** (direct SMTP — their reputation) or a managed cold-email provider (Smartlead/Instantly). The framework never sends through a shared transactional ESP and never pools reputation across operators.
 
 ## 4. Architecture & Repository Shape
 
@@ -328,7 +328,7 @@ class ExperimentPolicy(Protocol):
 ## 9. Open-Source-Specific Requirements
 
 - OSS-1: **License: Apache-2.0** (patent grant; permissive; revisit only with evidence of cloud capture).
-- OSS-2: **Responsible-use posture, enforced in code where possible:** compliance core non-bypassable; no SMTP; conservative defaults; RESPONSIBLE_USE.md; refuse features whose only purpose is evasion or deception — explicit disqualifiers from customer research adopted as project policy: **no blast tooling, no fake-human personas, no "just bumping this!" follow-up theater** (enforced by FR-3.8/FR-3.9, not just documented), plus no spintax, tracking cloaks, or suppression workarounds.
+- OSS-2: **Responsible-use posture, enforced in code where possible:** compliance core non-bypassable; no shared-pool/transactional-ESP sending; conservative defaults; RESPONSIBLE_USE.md; refuse features whose only purpose is evasion or deception — explicit disqualifiers from customer research adopted as project policy: **no blast tooling, no fake-human personas, no "just bumping this!" follow-up theater** (enforced by FR-3.8/FR-3.9, not just documented), plus no spintax, tracking cloaks, or suppression workarounds.
 - OSS-3: **Docs as a first-class deliverable:** quickstart (zero-to-dry-run in 15 minutes on FakeProviders), example walkthroughs, adapter author guide, "Deliverability & Compliance 101," threat model, and the citable ethics statement (FR-7.6).
 - OSS-4: **Quality gates:** typed everywhere; CI = fake-provider e2e + injection corpus + acceptance-gate suite (§10); semver from 0.x; interface stability promises at 1.0; PyPI releases.
 - OSS-5: **Contribution surface:** adapters are the designed contribution unit; CONTRIBUTING.md + adapter cookiecutter.
@@ -393,7 +393,7 @@ Explicitly parked, recorded so they shape interfaces but not the schedule:
 
 | # | Risk | L/I | Mitigation |
 |---|---|---|---|
-| R-1 | **Abuse: the framework is used to spam** | M / H | Non-bypassable compliance core incl. frequency caps; no SMTP; conservative defaults; RESPONSIBLE_USE + citable ethics doc; refuse evasion features. |
+| R-1 | **Abuse: the framework is used to spam** | M / H | Non-bypassable compliance core incl. frequency caps; own-domain or managed-provider sending only (no shared pool); conservative defaults; RESPONSIBLE_USE + citable ethics doc; refuse evasion features. |
 | R-2 | **Prompt injection** via scraped content or replies | M / H | §8.7: untrusted envelopes, allowlisted typed actions only, claims lint as backstop, CI injection corpus (disqualifying gate 2). |
 | R-3 | **Deliverability collapse for users** | M / H | `doctor` checks; hard caps; kill switches; calibrated verification (FR-2.6); Deliverability 101 docs; FakeProvider-first onboarding. |
 | R-4 | **"Approve all" reviewer fatigue** defeats the governance model | M / H | §8.8 reviewer UX as a P0 requirement; queue-health alerting; friction on bulk-approve. |

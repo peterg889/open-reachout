@@ -12,6 +12,16 @@ Self-hosted. BYO API keys. Compliance guardrails (CAN-SPAM, volume caps, suppres
 
 ## Status
 
+**Sends from your own domain.** `reachout run --provider smtp` sends each
+gatekeeper-claimed touch directly from your own authenticated mailbox
+(Google Workspace / Microsoft 365 / self-hosted, via `OR_SMTP_MAILBOXES`) —
+your domain and reputation, with From, Message-ID, and one-click unsubscribe
+all on your domain. Because the framework drives each send itself, every gate
+(suppression, halt, frequency, budget) is enforced in the same transaction as
+the SMTP socket — no reactive-pause gap. Inbound replies and bounces correlate
+back by Message-ID via IMAP polling. (Managed providers like Smartlead remain
+an option for bundled warmup/rotation.)
+
 **M0–M4 core complete.** `reachout init --from-brief brief.yaml --tenant x`
 now compiles a Brief into a full program (personas, cohorts, generation
 prompts) with provenance and a Program Proposal containing sample emails —
@@ -71,7 +81,7 @@ Releases are gated on both examples working — the abstractions stay honest bec
 
 - **Config-first:** a whole outreach program is versionable YAML; `reachout validate && reachout run` is the interface.
 - **Pluggable edges, opinionated core:** sources, enrichers, email finders, verifiers, senders, LLMs, and reply actions are entry-point plugins; budgets, suppression, sequencing caps, and compliance validators are core and immutable.
-- **No SMTP, no shipped data, no telemetry.** Sending is delegated to cold-email providers (their abuse incentives stay in the loop); the project ships adapters, never contact data; your outreach data never leaves your deployment.
+- **Own-domain sending, no shipped data, no telemetry.** Send from your own authenticated domain (direct SMTP) or a managed cold-email provider — never a shared transactional ESP pool; the project ships adapters, never contact data; your outreach data never leaves your deployment.
 - **Honest statistics:** Thompson-sampling bandits with guardrail pausing and pooled attribute learning — because detecting a 5%→7% reply lift classically needs ~2,200 recipients per arm, which cold-email volumes never reach.
 
 License: Apache-2.0 (planned).

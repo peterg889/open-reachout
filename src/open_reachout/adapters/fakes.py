@@ -89,6 +89,8 @@ class FakeSendingProvider:
         self.paused_leads: list[str] = []
         self.paused_tenants: list[str] = []
 
+    capability = "campaign"
+
     def send(self, message: ClaimedTouch, subject: str, body: str) -> SendReceipt:
         self.sent.append((message, subject, body))
         return SendReceipt(touch_id=message.touch_id, provider_ref={"fake_id": message.touch_id})

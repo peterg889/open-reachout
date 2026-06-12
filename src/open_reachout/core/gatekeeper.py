@@ -51,6 +51,7 @@ class ClaimedTouch:
     tenant: str
     mailbox: str
     content_sha256: str
+    recipient: str = ""  # the verified canonical address (own-domain SMTP To)
 
     def __post_init__(self) -> None:
         if getattr(_claim_guard, "token", None) is not _CONSTRUCTION_TOKEN:
@@ -165,6 +166,7 @@ def claim(store: GateStore, touch: DraftTouch) -> ClaimedTouch | Refusal:
                 tenant=touch.tenant,
                 mailbox=mailbox,
                 content_sha256=touch.stored_content_hash,
+                recipient=touch.email_canonical,
             )
         finally:
             _claim_guard.token = None
@@ -193,6 +195,7 @@ class ClaimedSnapshot:
     tenant: str
     mailbox: str
     content_sha256: str
+    recipient: str = ""
 
 
 class DispatchStore(Protocol):
@@ -220,6 +223,7 @@ def reissue(store: DispatchStore, touch_id: str) -> ClaimedTouch | Refusal:
             tenant=snapshot.tenant,
             mailbox=snapshot.mailbox,
             content_sha256=snapshot.content_sha256,
+            recipient=snapshot.recipient,
         )
     finally:
         _claim_guard.token = None
