@@ -14,10 +14,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.4", "mypy>=1.10"]
+dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.4", "mypy>=1.10", "fastapi>=0.110", "httpx>=0.27"]
 postgres = ["psycopg[binary]>=3.1"]
 gemini = ["google-genai>=1.0"]
 anthropic = ["anthropic>=0.40"]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 reachout = "open_reachout.cli.main:app"
@@ -45,6 +46,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI dependency injection is call-in-default by design.
+"src/open_reachout/api/app.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -14,7 +14,7 @@ _TABLES = (
     "entity_keys", "entities", "suppressions", "forget_tombstones",
     "control_flags", "counters", "spend_ledger", "provider_events",
     "audit_events", "jobs", "mailboxes", "config_versions", "tenants",
-    "variant_stats", "escalations",
+    "variant_stats", "escalations", "operator_events",
 )
 
 

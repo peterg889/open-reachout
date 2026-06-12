@@ -260,3 +260,14 @@ CREATE TABLE IF NOT EXISTS escalations (
   resolved_at  timestamptz,
   resolved_by  text
 );
+
+-- Operator-emitted events (PRD FR-2.9): the trigger source for
+-- event-triggered campaigns; matching/launch logic is post-0.1.
+CREATE TABLE IF NOT EXISTS operator_events (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_type  text NOT NULL,
+  selector    jsonb NOT NULL DEFAULT '{}'::jsonb,
+  payload     jsonb NOT NULL DEFAULT '{}'::jsonb,
+  dedupe_key  text UNIQUE,
+  received_at timestamptz NOT NULL DEFAULT now()
+);

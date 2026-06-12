@@ -381,6 +381,28 @@ def report() -> None:
         typer.echo(build_report(conn))
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1"),
+    port: int = typer.Option(8714),
+) -> None:
+    """Serve the operator API + webhook endpoint (FR-1.6, spec 11).
+
+    Requires OR_DATABASE_DSN, OR_ATTRIBUTION_KEY, OR_API_TOKENS.
+    """
+    try:
+        import uvicorn
+    except ImportError as exc:
+        typer.secho("pip install 'open-reachout[api]' to serve", fg="red")
+        raise typer.Exit(2) from exc
+    from open_reachout.adapters.fakes import FakeSendingProvider
+    from open_reachout.api.app import create_app
+    from open_reachout.core.db import engine_from_env
+
+    application = create_app(engine_from_env(), FakeSendingProvider())
+    uvicorn.run(application, host=host, port=port)
+
+
 def main() -> None:  # console_scripts shim
     sys.exit(app())
 

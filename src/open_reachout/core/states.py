@@ -47,6 +47,7 @@ TRANSITIONS: dict[ProspectState, frozenset[ProspectState]] = {
     ProspectState.CONTACTED: frozenset(
         {
             ProspectState.ENGAGED,
+            ProspectState.CONVERTED,  # signed up from the link without replying
             ProspectState.BOUNCED,
             ProspectState.DECLINED,
             ProspectState.UNSUBSCRIBED,
