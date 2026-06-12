@@ -17,6 +17,9 @@ brief:
     brainstorm: adjacent license types, states with compact-licensure events
   about_us:
     name: TheraDirectory
+    # FR-3.11: healthcare-adjacent — the PHI screen runs over all outbound
+    # content and operator event payloads. We contact providers, not patients.
+    sector_sensitivity: healthcare
     what_we_do: >
       A therapist directory that is free until your first client inquiry,
       lists individual practitioners only - no platform bulk profiles - and
@@ -53,8 +56,17 @@ personas:
         sources: [nppes, state_boards]
       - id: ga_lpc_2026q3
         filters: { state: GA, taxonomy: ["101YP2500X"] }
-        monthly_budget: 300
+        monthly_budget: 250
         sources: [nppes, state_boards]
+      # Use case E (PRD Appendix A): compact-event campaign. Dormant until the
+      # operator's licensure-compact table flips a state to ISSUING and fires
+      # POST /v1/events {event_type: compact.issuing} - then newly-eligible
+      # providers get "you can now serve N more states" (FR-2.9).
+      - id: compact_newly_eligible
+        filters: { taxonomy: ["106H00000X", "101YP2500X"] }
+        monthly_budget: 50
+        sources: [nppes]
+        trigger: { event_type: compact.issuing }
     variants:
       - id: opener_provenance_first
         surface: opener_strategy

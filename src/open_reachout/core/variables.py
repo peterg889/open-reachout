@@ -38,6 +38,8 @@ DEFAULT_REGISTRY: dict[str, TrustClass] = {
     "prospect.first_name": TrustClass.PROSPECT,
     "prospect.org_name": TrustClass.PROSPECT,
     "prospect.city": TrustClass.PROSPECT,
+    "asset.*": TrustClass.TRUSTED,  # operator-vetted collateral links (FR-3.10)
+    "sender.*": TrustClass.TRUSTED,  # human-approved sender facts (FR-0.7)
     "evidence.*": TrustClass.UNTRUSTED,
     "signal.*": TrustClass.UNTRUSTED,
     "thread.*": TrustClass.UNTRUSTED,

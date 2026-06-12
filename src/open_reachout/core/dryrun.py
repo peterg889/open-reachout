@@ -38,12 +38,23 @@ from open_reachout.core.variables import ResolvedValue, TrustClass, extract_slot
 
 
 def validator_context(tenant: TenantConfig) -> ValidatorContext:
-    identity = tenant.brief.about_us.identity
+    from open_reachout.core.compliance.claims import registry_version
+
+    about_us = tenant.brief.about_us
+    identity = about_us.identity
     return ValidatorContext(
         physical_address=identity.physical_address,
         unsubscribe_text=identity.unsubscribe_text,
         sender_identity=identity.sender,
-        allowed_url_prefixes=tuple(tenant.brief.about_us.links.values()),
+        # registered collateral URLs are allowlisted (FR-3.10): vetted at
+        # registration, so the URL validator lets them through
+        allowed_url_prefixes=tuple(about_us.links.values())
+        + tuple(a.url for a in about_us.assets),
+        claim_mode=about_us.claims_mode,
+        approved_claims=tuple(about_us.approved_claims),
+        claim_registry_version=registry_version(about_us),
+        sector_sensitivity=about_us.sector_sensitivity,
+        compliance_regime=about_us.compliance_regime,
     )
 
 
@@ -72,6 +83,7 @@ def build_values(
     card: EvidenceCard,
     tenant: TenantConfig,
     persona: PersonaSpec,
+    sender_facts: dict[str, str] | None = None,
 ) -> dict[str, ResolvedValue]:
     """Map every slot in the variant prompt to a value with correct trust class.
 
@@ -82,7 +94,20 @@ def build_values(
     values: dict[str, ResolvedValue] = {}
     fact_iter = iter(facts)
     for slot in extract_slots(prompt):
-        if slot.startswith("evidence."):
+        if slot.startswith("sender."):
+            sender_fact = (sender_facts or {}).get(slot[len("sender."):])
+            if sender_fact is None:
+                continue  # unapproved sender fact: resolve() raises, escalates
+            values[slot] = ResolvedValue(slot, sender_fact, TrustClass.TRUSTED)
+        elif slot.startswith("asset."):
+            asset = next(
+                (a for a in tenant.brief.about_us.assets if a.id == slot[len("asset."):]),
+                None,
+            )
+            if asset is None:
+                continue  # unknown asset id: resolve() raises, caller escalates
+            values[slot] = ResolvedValue(slot, asset.url, TrustClass.TRUSTED)
+        elif slot.startswith("evidence."):
             fact = next(fact_iter, None)
             if fact is None:
                 continue  # unresolvable -> resolve() raises, caller escalates
@@ -159,6 +184,8 @@ def run(
         trusted = trusted_context(tenant, persona)
         variant = persona.variants[0]  # bandit selection is meaningless pre-launch
         for cohort in persona.cohorts:
+            if cohort.trigger is not None:
+                continue  # event-triggered cohorts are dormant until fired (FR-2.9)
             source = next((sources[s] for s in cohort.sources if s in sources), None)
             if source is None:
                 continue

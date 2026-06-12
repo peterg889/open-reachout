@@ -47,6 +47,19 @@ def build_report(conn: Connection) -> str:
     ).fetchall()
     out += _section("Replies by intent", [f"- {i}: {n}" for i, n in replies])
 
+    objections = conn.execute(
+        text(
+            """
+            SELECT tenant, class, cohort_id, count(*) FROM objections
+            GROUP BY 1, 2, 3 ORDER BY 4 DESC
+            """
+        )
+    ).fetchall()
+    out += _section(
+        "Objections (FR-4.3 — this is the market research)",
+        [f"- {t} / {co}: {cl} x{n}" for t, cl, co, n in objections],
+    )
+
     variants = conn.execute(
         text(
             """

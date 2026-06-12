@@ -164,7 +164,8 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
         row = conn.execute(
             text(
                 """
-                SELECT r.body, r.agentic_exchanges, p.id, p.email_canonical, t.slug
+                SELECT r.body, r.agentic_exchanges, p.id, p.email_canonical, t.slug,
+                       p.cohort_id
                 FROM replies r
                 JOIN prospects p ON p.id = r.prospect_id
                 JOIN tenants t ON t.id = p.tenant_id
@@ -175,9 +176,15 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
         ).fetchone()
         if row is None:
             raise PermanentJobError(f"reply {reply_id} not found")
-        body, exchanges, prospect_id, email, _tenant = row
+        body, exchanges, prospect_id, email, _tenant, cohort_id = row
         if body is None:
             return  # scrubbed by forget: nothing to classify
+
+        # FR-3.5 stop-on-reply: any reply ends the drip; the conversation owns
+        # the entity now. Deterministic, before any model-dependent routing.
+        from open_reachout.core.sendpath import release_sequence
+
+        release_sequence(conn, str(prospect_id))
 
         decision = route(body, llm, agentic_exchanges=exchanges)
         if decision.intent == "interested":
@@ -193,6 +200,9 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
             ).fetchone()
             if variant_row and variant_row[0]:
                 record_success(conn, _tenant, variant_row[0])
+            # FR-4.4: an explicitly interested reply is a positive event
+            queue.enqueue(conn, "referral", {"prospect_id": str(prospect_id)},
+                          idempotency_key=f"referral:{prospect_id}")
         conn.execute(
             text(
                 """
@@ -225,6 +235,26 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
                 reason=decision.reason,
                 payload={"intent": decision.intent, "confidence": decision.confidence},
             )
+
+        if decision.intent == "objection":
+            # FR-4.3: the objections are the market research — taxonomize and
+            # keep the thread link; the digest reports frequency per cohort.
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO objections (tenant, class, reply_id, cohort_id)
+                    VALUES (:t, :c, CAST(:r AS uuid), :co)
+                    """
+                ),
+                {"t": _tenant, "c": decision.objection_class or "other",
+                 "r": reply_id, "co": str(cohort_id)},
+            )
+
+        # FR-5.6: souring shows in replies before complaint rates — check the
+        # cohort's sentiment on every Nth classified reply (deterministic).
+        from open_reachout.stats.sentiment import maybe_evaluate
+
+        maybe_evaluate(conn, _tenant, str(cohort_id))
 
     return classify
 

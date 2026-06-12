@@ -67,7 +67,9 @@ def wrap(content: str, *, source: str, idem: str = "") -> Envelope:
 
 
 def _allowed_sources(source: str) -> set[str]:
-    base = {"web", "reply", "import"}
+    # research_note: tiered research notes are partly LLM/web-derived and are
+    # untrusted-class by spec 8.10 — they enter prompts only enveloped.
+    base = {"web", "reply", "import", "research_note"}
     if source.startswith("variable:"):
         base.add(source)
     return base

@@ -21,8 +21,10 @@ HUMAN_ACTOR_PREFIX = escalations.HUMAN_ACTOR_PREFIX
 DECLINE_MEMORY_DAYS = 90
 
 #: Kinds an auto-mode (hands_off) may apply without a human; everything else
-#: always waits (FR-0.3 always-human set).
-AUTO_APPLICABLE = frozenset({"budget_shift"})
+#: always waits (FR-0.3 always-human set). Rebalances move money between
+#: existing cohorts or pause one — never raise total spend or touch personas
+#: (FR-6.5), so they sit inside the hands_off envelope.
+AUTO_APPLICABLE = frozenset({"budget_shift", "rebalance"})
 
 
 @dataclass(frozen=True)
@@ -153,13 +155,28 @@ def approve(conn: Connection, proposal_id: str, *, actor: str, auto: bool = Fals
 
 
 def _apply(conn: Connection, proposal: Proposal) -> None:
-    """Effect of approval. Only budget_shift mutates state in 0.1; new_cohort/
-    value_prop require a config edit + re-validate (surfaced in the summary)."""
-    if proposal.kind != "budget_shift":
-        return  # recorded as approved; the operator edits config and re-validates
+    """Effect of approval. budget_shift and rebalance mutate counters;
+    new_cohort/value_prop require a config edit + re-validate (surfaced in
+    the summary)."""
     from datetime import UTC
 
     period = datetime.now(UTC).strftime("%Y-%m")
+    if proposal.kind == "rebalance":
+        if proposal.payload.get("action") == "pause":
+            conn.execute(
+                text(
+                    """
+                    UPDATE counters SET cap = 0
+                    WHERE scope_type = 'cohort_month' AND scope_id = :s AND period = :p
+                    """
+                ),
+                {"s": proposal.payload["cohort"], "p": period},
+            )
+            return
+        # fall through: a shift-shaped rebalance uses budget_shift mechanics
+    elif proposal.kind != "budget_shift":
+        return  # recorded as approved; the operator edits config and re-validates
+
     delta = int(proposal.payload["amount"])
     for scope_id, sign in ((proposal.payload["from_cohort"], -1),
                            (proposal.payload["to_cohort"], +1)):
@@ -172,6 +189,23 @@ def _apply(conn: Connection, proposal: Proposal) -> None:
             ),
             {"d": sign * delta, "s": scope_id, "p": period},
         )
+
+
+def auto_review(conn: Connection, tenant: str, cohort_launch: str) -> list[str]:
+    """FR-6.2 `auto_launch_within_budget`: the hands_off policy gate. Reuses
+    the same proposal objects — no separate path. Only AUTO_APPLICABLE kinds
+    (budget_shift, rebalance) are auto-approved: they move money inside the
+    existing envelope and never raise totals. `new_cohort` and value-prop
+    proposals stay human even here — launching a cohort is a config change,
+    applied through `reachout approve` + the synthesis/edit-pinning flow."""
+    if cohort_launch != "auto_within_budget":
+        return []
+    approved: list[str] = []
+    for proposal in list_open(conn, tenant):
+        if proposal.kind in AUTO_APPLICABLE:
+            if approve(conn, proposal.id, actor="system:autonomy", auto=True):
+                approved.append(proposal.id)
+    return approved
 
 
 def _audit(conn: Connection, proposal_id: str, event: str, actor: str, payload: dict) -> None:

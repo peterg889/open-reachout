@@ -141,3 +141,42 @@ def test_digest_reports_the_live_state(pg_engine: Engine, conn, seed: Seed) -> N
     assert "tenant_month stagematch" in digest
     assert "question: 1" in digest
     assert "v1: 0/1 positive" in digest
+
+
+# ------------------------------------------------ objection library (FR-4.3)
+class ObjectionStub:
+    def complete(self, task, prompt, schema):  # noqa: ANN001, ANN201
+        return schema.model_validate(
+            {"intent": "objection", "confidence": 0.9, "objection_class": "price"}
+        )
+
+
+def test_objection_replies_land_in_taxonomy_store(
+    pg_engine: Engine, conn, seed: Seed  # noqa: ANN001
+) -> None:
+    reply_id = conn.execute(
+        text(
+            """INSERT INTO replies (prospect_id, body) VALUES
+               (CAST(:p AS uuid), 'Seems expensive for a coffee shop like ours')
+               RETURNING id"""
+        ),
+        {"p": seed.prospect_id},
+    ).scalar()
+    conn.commit()
+    from open_reachout.core.queue import enqueue
+
+    with pg_engine.begin() as c:
+        enqueue(c, "classify", {"reply_id": str(reply_id)},
+                idempotency_key=f"classify:{reply_id}")
+    make_worker(pg_engine, FakeSendingProvider(), ObjectionStub()).drain()
+    with pg_engine.begin() as c:
+        klass, cohort = c.execute(
+            text("SELECT class, cohort_id FROM objections WHERE tenant = :t"),
+            {"t": seed.tenant},
+        ).fetchone()
+        assert klass == "price"
+        assert cohort == "austin_venues"
+        from open_reachout.core.report import build_report
+
+        digest = build_report(c)
+        assert "price x1" in digest  # objection trend reaches the digest (FR-8.1)

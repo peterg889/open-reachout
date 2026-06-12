@@ -277,7 +277,7 @@ def run(
     the prospecting queues idle and the worker still serves deliver/classify/
     control."""
     from open_reachout.adapters.fakes import FakeSendingProvider
-    from open_reachout.core import dryrun, events, prospecting, sendpath
+    from open_reachout.core import dryrun, events, noshow, prospecting, referrals, sendpath
     from open_reachout.core.db import engine_from_env
     from open_reachout.core.worker import Worker
 
@@ -323,9 +323,17 @@ def run(
     handlers = {
         "control": events.make_control_handler(sending),  # type: ignore[arg-type]
         "classify": events.make_classify_handler(backend),  # type: ignore[arg-type]
-        "deliver": sendpath.make_deliver_handler(sending, contexts),  # type: ignore[arg-type]
+        "deliver": sendpath.make_deliver_handler(
+            sending,  # type: ignore[arg-type]
+            contexts,
+            sequences={c.tenant: {p.id: p.sequence for p in c.personas}
+                       for c in configs},
+        ),
         "qualify": prospecting.make_qualify_handler(runtimes, backend),  # type: ignore[arg-type]
         "compose": prospecting.make_compose_handler(runtimes, backend),  # type: ignore[arg-type]
+        "trigger": prospecting.make_trigger_handler(runtimes),
+        "referral": referrals.make_referral_handler(runtimes, backend),
+        "reengage": noshow.make_reengage_handler(runtimes, backend),  # type: ignore[arg-type]
     }
     # discover/enrich need live source + enricher adapters (account-bound).
     # When configured, register them here; until then those queues simply
@@ -395,14 +403,46 @@ def approve(
     resolve: str = typer.Option(None, help="escalation id to resolve"),
     proposal: str = typer.Option(None, help="proposal id to approve"),
     decline: str = typer.Option(None, help="proposal id to decline (remembered 90d)"),
+    task_done: str = typer.Option(None, help="human task id done (counts as contact)"),
+    task_skip: str = typer.Option(None, help="human task id to skip (touch released)"),
+    send: str = typer.Option(None, help="ramp-held touch id to release to the gatekeeper"),
+    reject: str = typer.Option(None, help="ramp-held touch id to reject (released)"),
+    sender_profile_id: str = typer.Option(
+        None, "--sender-profile", help="proposed sender-profile id to approve (FR-0.7)"
+    ),
     note: str = typer.Option("", help="note (audited)"),
 ) -> None:
-    """Work the escalation queue and discovery proposals (FR-4.6/6.2, RX-1)."""
-    from open_reachout.core import escalations, proposals
+    """Work the escalation queue, discovery proposals, human tasks, and the
+    message-review ramp (FR-4.6/6.2/3.6/0.3, RX-1)."""
+    from open_reachout.core import escalations, human_tasks, proposals, sendpath
     from open_reachout.core.db import engine_from_env
 
     actor = f"operator:{os.environ.get('USER', 'cli')}"
     with engine_from_env().begin() as conn:
+        if sender_profile_id:
+            from open_reachout.core import sender_profile as sp
+
+            ok = sp.approve(conn, sender_profile_id, actor=actor)
+            typer.secho("approved — facts now resolve as {{sender.*}}" if ok
+                        else "not a proposed profile", fg="green" if ok else "yellow")
+            return
+        if send or reject:
+            ok = (
+                sendpath.approve_pending(conn, send, actor=actor)
+                if send
+                else sendpath.reject_pending(conn, reject, actor=actor, note=note)
+            )
+            typer.secho("recorded" if ok else "not a pending-review touch",
+                        fg="green" if ok else "yellow")
+            return
+        if task_done or task_skip:
+            ok = human_tasks.resolve(
+                conn, task_done or task_skip, actor=actor,
+                done=bool(task_done), note=note,
+            )
+            typer.secho("recorded" if ok else "not a pending task",
+                        fg="green" if ok else "yellow")
+            return
         if resolve:
             ok = escalations.resolve(conn, resolve, actor=actor, note=note)
             typer.secho(f"resolved {resolve}" if ok else "not an open escalation",
@@ -418,9 +458,24 @@ def approve(
             typer.secho(f"declined {decline}" if ok else "not an open proposal",
                         fg="green" if ok else "yellow")
             return
+        human_tasks.expire(conn)  # spec 8.13: stale tasks must not park prospects
         escs = escalations.list_open(conn)
         props = proposals.list_open(conn)
+        tasks = human_tasks.list_pending(conn)
+        held = sendpath.list_pending_review(conn)
 
+    if held:
+        typer.secho(f"\nReview ramp ({len(held)}):", fg="cyan")
+        for tid, campaign, subject, body in held:
+            typer.echo(f"  {tid} [{campaign}] {subject}")
+            typer.echo("    " + body.replace("\n", "\n    "))
+        typer.echo("  decide: reachout approve --send <id> | --reject <id>")
+    if tasks:
+        typer.secho(f"\nHuman tasks ({len(tasks)}):", fg="cyan")
+        for ht in tasks:
+            typer.echo(f"  {ht.id} {ht.instruction}  ({ht.tenant})")
+            typer.echo("    " + ht.brief.replace("\n", "\n    "))
+        typer.echo("  record: reachout approve --task-done <id> | --task-skip <id>")
     if not escs and not props:
         typer.secho("nothing open: escalation queue and proposals are clear", fg="green")
         return
@@ -439,19 +494,50 @@ def approve(
 @app.command()
 def discover(
     config_dir: Path = typer.Argument(..., help="tenant dirs"),  # noqa: B008 — typer idiom
+    llm: str = typer.Option(
+        "none", help="none (outcome mining only) | gemini | anthropic — also work "
+        "the Brief's brainstorm directive (FR-0.5)"
+    ),
 ) -> None:
-    """Run the discovery agent's outcome mining across tenants (FR-6.1)."""
+    """Run the discovery agent across tenants: outcome mining (FR-6.1), plus
+    goal brainstorming (FR-0.5) when an LLM backend is given."""
     from open_reachout.agents import discovery
     from open_reachout.core.db import engine_from_env
+    from open_reachout.core.interfaces import LLMBackend
 
-    tenants = sorted({load_tenant(f).tenant for f in config_dir.rglob("tenant.yaml")})
+    backend: LLMBackend | None = None
+    if llm == "gemini":
+        from open_reachout.adapters.llm.gemini_backend import GeminiBackend
+
+        backend = GeminiBackend()
+    elif llm == "anthropic":
+        from open_reachout.adapters.llm.anthropic_backend import AnthropicBackend
+
+        backend = AnthropicBackend()
+
+    configs = [load_tenant(f) for f in sorted(config_dir.rglob("tenant.yaml"))]
     total = 0
     with engine_from_env().begin() as conn:
-        for slug in tenants:
-            ids = discovery.analyze(conn, slug)
+        for config in configs:
+            ids = discovery.analyze(conn, config.tenant)
+            ids += discovery.rebalance_scan(conn, config)  # FR-6.5, deterministic
+            if backend is not None:
+                ids += discovery.brainstorm(conn, backend, config)
+                revision = discovery.resynthesize_on_drift(conn, backend, config)
+                if revision:
+                    ids.append(revision)
+            # FR-6.2: hands_off auto-applies within-envelope proposals
+            from open_reachout.core import proposals as proposals_mod
+            from open_reachout.core.config import expand_autonomy
+
+            auto = proposals_mod.auto_review(
+                conn, config.tenant, expand_autonomy(config.brief.autonomy).cohort_launch
+            )
+            if auto:
+                typer.echo(f"{config.tenant}: auto-applied {len(auto)} (hands_off)")
             total += len(ids)
             if ids:
-                typer.echo(f"{slug}: {len(ids)} proposal(s)")
+                typer.echo(f"{config.tenant}: {len(ids)} proposal(s)")
     typer.secho(
         f"discovery: {total} proposal(s) recorded — review with `reachout approve`",
         fg="green",
@@ -506,8 +592,9 @@ def research(
     prospect level is the Evidence Card, refreshed by enrichment)."""
     from open_reachout.core import research as research_mod
     from open_reachout.core.db import engine_from_env
+    from open_reachout.core.interfaces import LLMBackend
 
-    backend = None
+    backend: LLMBackend | None = None
     if llm == "gemini":
         from open_reachout.adapters.llm.gemini_backend import GeminiBackend
 
@@ -517,12 +604,74 @@ def research(
 
         backend = AnthropicBackend()
 
-    tenants = sorted({load_tenant(f).tenant for f in config_dir.rglob("tenant.yaml")})
+    configs = [load_tenant(f) for f in sorted(config_dir.rglob("tenant.yaml"))]
     total = 0
     with engine_from_env().begin() as conn:
-        for slug in tenants:
-            total += research_mod.refresh_all(conn, slug, backend)  # type: ignore[arg-type]
+        for config in configs:
+            total += research_mod.refresh_all(
+                conn, config.tenant, backend,
+                research_directive=config.brief.research,
+            )
+            if backend is not None:
+                # FR-0.7: propose a sender profile when none is approved yet;
+                # approval is `reachout approve --sender-profile <id>`.
+                from open_reachout.core import sender_profile
+
+                if not sender_profile.approved_facts(conn, config.tenant):
+                    sender_profile.propose(conn, backend, config)
+                    total += 1
     typer.secho(f"research: {total} note(s) refreshed", fg="green")
+
+
+@app.command()
+def signals(
+    csv_path: Path = typer.Argument(..., help="license-filings CSV"),  # noqa: B008
+    event_type: str = typer.Option(
+        "license.issued", help="event type matched against trigger: cohorts"
+    ),
+) -> None:
+    """Ingest a public-records signal feed (FR-2.2): new liquor/entertainment
+    license filings become timing events that fire `trigger:` cohorts."""
+    from open_reachout.adapters.sources.signals import ingest_license_csv
+    from open_reachout.core.db import engine_from_env
+
+    with engine_from_env().begin() as conn:
+        rows, fired = ingest_license_csv(conn, csv_path, event_type=event_type)
+    typer.secho(
+        f"signals: {rows} row(s) read, {fired} new event(s) fired "
+        "(duplicates skipped)", fg="green",
+    )
+
+
+@app.command()
+def audit(
+    llm: str = typer.Option("gemini", help="gemini | anthropic — the judging model"),
+    per_cohort: int = typer.Option(5, help="sampled sends per cohort"),
+    window_days: int = typer.Option(7, help="how far back to sample"),
+) -> None:
+    """Sampled groundedness audit over SENT mail (FR-8.6) — run weekly."""
+    from open_reachout.core import monitor
+    from open_reachout.core.db import engine_from_env
+    from open_reachout.core.interfaces import LLMBackend
+
+    backend: LLMBackend
+    if llm == "anthropic":
+        from open_reachout.adapters.llm.anthropic_backend import AnthropicBackend
+
+        backend = AnthropicBackend()
+    else:
+        from open_reachout.adapters.llm.gemini_backend import GeminiBackend
+
+        backend = GeminiBackend()
+    with engine_from_env().begin() as conn:
+        results = monitor.audit_sent_sample(
+            conn, backend, per_cohort=per_cohort, window_days=window_days
+        )
+    for key, stats in sorted(results.items()):
+        flag = "" if stats["failures"] == 0 else "  <-- review escalations"
+        typer.echo(f"{key}: {stats['rate']:.0%} grounded over {stats['n']}{flag}")
+    if not results:
+        typer.secho("no sent mail in window", fg="yellow")
 
 
 @app.command()

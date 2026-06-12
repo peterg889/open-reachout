@@ -50,6 +50,9 @@ class FakeStore:
     def frequency_ok(self, entity_id: str, tenant: str) -> bool:
         return self.frequency_pass
 
+    def sequence_continuation_ok(self, entity_id: str, prospect_id: str) -> bool:
+        return getattr(self, "continuation_pass", True)
+
     def try_consume_budget(self, tenant: str, touch: DraftTouch) -> bool:
         if self.budget_available > 0:
             self.budget_available -= 1

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -21,7 +21,7 @@ from open_reachout.agents.composer import ComposeEscalation, ComposeInputs, comp
 from open_reachout.agents.qualifier import qualify
 from open_reachout.core import dryrun, queue, suppression
 from open_reachout.core.compliance.validators import ValidatorContext
-from open_reachout.core.config import PersonaSpec, TenantConfig
+from open_reachout.core.config import CohortSpec, PersonaSpec, TenantConfig
 from open_reachout.core.entity import resolve_entity
 from open_reachout.core.escalations import escalate
 from open_reachout.core.interfaces import (
@@ -52,6 +52,9 @@ class TenantRuntime:
     config: TenantConfig
     tenant_id: str
     validator_ctx: ValidatorContext
+    #: Human-approved sender facts (FR-0.7) — the only researched content that
+    #: resolves as trusted-class {{sender.*}} variables.
+    sender_facts: dict[str, str] = field(default_factory=dict)
 
 
 def _tenant_id(conn: Connection, slug: str) -> str:
@@ -137,7 +140,9 @@ def make_discover_handler(
         source = next((sources[s] for s in cohort.sources if s in sources), None)
         if source is None:
             raise PermanentJobError(f"no source adapter for cohort {cohort.id}")
-        result = source.discover(cohort.filters, job.payload.get("cursor"))
+        # event triggers (FR-2.9) may narrow discovery with selector filters
+        filters = {**cohort.filters, **job.payload.get("extra_filters", {})}
+        result = source.discover(filters, job.payload.get("cursor"))
         for candidate in result.candidates:
             ingest_candidate(conn, runtime, persona, cohort.id, candidate)
         if result.cursor:  # page through large sources
@@ -148,6 +153,94 @@ def make_discover_handler(
             )
 
     return discover
+
+
+def make_trigger_handler(runtimes: dict[str, TenantRuntime]) -> Handler:
+    """FR-2.9: route an operator event to every `trigger: event` cohort.
+
+    Matching, eligible prospects already in the cohort re-enter the pipeline
+    at compose; one discover job per cohort lets the event surface new
+    candidates (selector filters merged into the source query). The trigger
+    only *starts* sequences — suppression, frequency, budget, and halt gates
+    all apply unchanged downstream.
+    """
+
+    def trigger(conn: Connection, job: Job) -> None:
+        event_id = str(job.payload["event_id"])
+        row = conn.execute(
+            text("SELECT event_type, selector FROM operator_events WHERE id = :i"),
+            {"i": event_id},
+        ).fetchone()
+        if row is None:
+            raise PermanentJobError(f"operator event {event_id} not found")
+        event_type, selector = str(row[0]), dict(row[1] or {})
+        if event_type == "booking.no_show":
+            # FR-4.5: entity-level event, not a cohort trigger
+            from open_reachout.core.noshow import handle_no_show_event
+
+            for runtime in runtimes.values():
+                handle_no_show_event(conn, runtime.tenant_id, selector)
+            return
+        for runtime in runtimes.values():
+            for persona in runtime.config.personas:
+                for cohort in persona.cohorts:
+                    if cohort.trigger is None or cohort.trigger.event_type != event_type:
+                        continue
+                    _fire_trigger(conn, runtime, persona.id, cohort, event_id, selector)
+
+    return trigger
+
+
+def _fire_trigger(
+    conn: Connection, runtime: TenantRuntime, persona_id: str, cohort: CohortSpec,
+    event_id: str, selector: dict[str, object],
+) -> None:
+    if runtime.config.brief.about_us.sector_sensitivity != "none":
+        # FR-3.11: operator payloads are screened too — a calendar/EHR
+        # integration bug must not push client information into the pipeline.
+        from open_reachout.core.compliance.phi import phi_hits
+
+        hits = phi_hits(json.dumps(selector))
+        if hits:
+            escalate(
+                conn, tenant=runtime.config.tenant, subject_type="operator_event",
+                subject_id=event_id,
+                reason=f"event selector rejected: PHI-shaped content ({', '.join(hits)})",
+            )
+            return
+    params: dict[str, object] = {
+        "t": runtime.tenant_id, "c": cohort.id, "s": ProspectState.QUALIFIED.value,
+    }
+    email_clause = ""
+    if entity_email := selector.get("entity_email"):
+        canonical = _canon(str(entity_email))
+        if canonical is None:
+            return  # malformed selector address: nothing can match
+        email_clause = "AND email_canonical = :e"
+        params["e"] = canonical
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT id FROM prospects
+            WHERE tenant_id = CAST(:t AS uuid) AND cohort_id = :c
+              AND state = :s {email_clause}
+            """
+        ),
+        params,
+    ).fetchall()
+    for (prospect_id,) in rows:
+        queue.enqueue(
+            conn, "compose", {"prospect_id": str(prospect_id)},
+            idempotency_key=f"trigger:{event_id}:{prospect_id}",
+        )
+    queue.enqueue(
+        conn, "discover",
+        {
+            "tenant": runtime.config.tenant, "persona": persona_id, "cohort": cohort.id,
+            "extra_filters": {k: v for k, v in selector.items() if k != "entity_email"},
+        },
+        idempotency_key=f"trigger:{event_id}:discover:{cohort.id}",
+    )
 
 
 def make_enrich_handler(
@@ -218,18 +311,61 @@ def make_qualify_handler(runtimes: dict[str, TenantRuntime], llm: LLMBackend) ->
 def make_compose_handler(runtimes: dict[str, TenantRuntime], llm: LLMBackend) -> Handler:
     def compose_handler(conn: Connection, job: Job) -> None:
         prospect_id = str(job.payload["prospect_id"])
-        runtime, persona, card, candidate = _load_for_compose(conn, runtimes, prospect_id)
+        step_index = int(job.payload.get("step_index", 0))
+        if step_index == 0:
+            runtime, persona, card, candidate = _load_for_compose(
+                conn, runtimes, prospect_id
+            )
+        else:
+            # Follow-up steps (FR-3.5): the prospect must still be 'contacted'.
+            # Any other state means a stop condition fired (reply, bounce,
+            # unsubscribe, conversion) — end the drip and unlock the entity.
+            runtime, persona, candidate = _persona_and_candidate(
+                conn, runtimes, prospect_id, "contacted"
+            )
+            card = _load_card(conn, prospect_id)
+            if persona is None:
+                from open_reachout.core.sendpath import release_sequence
+
+                release_sequence(conn, prospect_id)
+                return
         if persona is None:
             return
-        variant, _posterior = select_variant(conn, runtime.config.tenant, persona.variants)
+        instruction = persona.sequence.human_tasks.get(step_index)
+        if instruction is not None:
+            # FR-3.6: this step is off-channel — brief the operator and park.
+            from open_reachout.core import human_tasks
+
+            human_tasks.create_for_step(
+                conn, tenant=runtime.config.tenant, prospect_id=prospect_id,
+                campaign_id=f"{persona.id}:human_task", step_index=step_index,
+                instruction=instruction, value_prop=persona.value_prop,
+            )
+            return
+        pool = persona.variants
+        if step_index > 0:
+            # FR-3.9: follow-ups are distinct variant surfaces, never resends.
+            followups = [v for v in persona.variants
+                         if v.surface.startswith("followup")]
+            specific = [v for v in followups
+                        if v.surface == f"followup_{step_index}"]
+            pool = specific or followups
+            if not pool:
+                from open_reachout.core.sendpath import release_sequence
+
+                release_sequence(conn, prospect_id)  # no follow-up prompts: drip ends
+                return
+        variant, _posterior = select_variant(conn, runtime.config.tenant, pool)
         trusted = dryrun.trusted_context(runtime.config, persona)
-        values = dryrun.build_values(variant.prompt, candidate, card, runtime.config, persona)
+        values = dryrun.build_values(variant.prompt, candidate, card, runtime.config,
+                                     persona, sender_facts=runtime.sender_facts)
         try:
             result = compose(
                 llm,
                 ComposeInputs(
                     variant_id=variant.id, variant_prompt=variant.prompt, values=values,
                     validator_ctx=runtime.validator_ctx, trusted_context=trusted,
+                    step_index=step_index,
                 ),
             )
         except (ComposeEscalation, KeyError) as exc:
@@ -238,8 +374,10 @@ def make_compose_handler(runtimes: dict[str, TenantRuntime], llm: LLMBackend) ->
             return
         queue_draft(
             conn, prospect_id=prospect_id, campaign_id=f"{persona.id}:{variant.surface}",
-            variant_id=variant.id, step_index=0, kind="cold",
+            variant_id=variant.id, step_index=step_index,
+            kind="cold" if step_index == 0 else "followup",
             draft=result.draft, content_hash=result.content_sha256,
+            approve_first=persona.approve_first,
         )
 
     return compose_handler
@@ -330,18 +468,20 @@ def _load_card(conn: Connection, prospect_id: str) -> EvidenceCard:
 
 
 def _persona_and_candidate(
-    conn: Connection, runtimes: dict[str, TenantRuntime], prospect_id: str, required_state: str
+    conn: Connection, runtimes: dict[str, TenantRuntime], prospect_id: str,
+    required_state: str | tuple[str, ...],
 ) -> tuple[TenantRuntime | None, PersonaSpec | None, Candidate | None]:
+    states = [required_state] if isinstance(required_state, str) else list(required_state)
     row = conn.execute(
         text(
             """
             SELECT t.slug, p.persona_id, e.display_name, p.email_raw, p.source_ref
             FROM prospects p JOIN entities e ON e.id = p.entity_id
             JOIN tenants t ON t.id = p.tenant_id
-            WHERE p.id = CAST(:i AS uuid) AND p.state = :s
+            WHERE p.id = CAST(:i AS uuid) AND p.state = ANY(:s)
             """
         ),
-        {"i": prospect_id, "s": required_state},
+        {"i": prospect_id, "s": states},
     ).fetchone()
     if row is None:
         return None, None, None
@@ -368,20 +508,41 @@ def _load_for_compose(conn, runtimes, prospect_id):  # noqa: ANN001
     return runtime, persona, _load_card(conn, prospect_id), candidate
 
 
+def _load_for_referral(
+    conn: Connection, runtimes: dict[str, TenantRuntime], prospect_id: str
+) -> tuple[TenantRuntime | None, PersonaSpec | None, EvidenceCard, Candidate | None]:
+    """FR-4.4: positive-event prospects — converted, or engaged via a reply."""
+    runtime, persona, candidate = _persona_and_candidate(
+        conn, runtimes, prospect_id, ("converted", "engaged", "contacted")
+    )
+    return runtime, persona, _load_card(conn, prospect_id), candidate
+
+
 def runtime_for(conn: Connection, config: TenantConfig) -> TenantRuntime:
-    """Build a TenantRuntime, ensuring the tenant row exists."""
+    """Build a TenantRuntime, ensuring the tenant row and claim registry exist."""
+    from open_reachout.core.compliance.claims import ensure_registry
+    from open_reachout.core.sender_profile import approved_facts
+
+    tenant_id = _tenant_id(conn, config.tenant)
+    ensure_registry(conn, config.tenant, config.brief.about_us)  # FR-3.2 audit record
     return TenantRuntime(
         config=config,
-        tenant_id=_tenant_id(conn, config.tenant),
+        tenant_id=tenant_id,
         validator_ctx=dryrun.validator_context(config),
+        sender_facts=approved_facts(conn, config.tenant),  # FR-0.7
     )
 
 
 def seed_discovery(conn: Connection, runtime: TenantRuntime) -> int:
-    """Enqueue a discover job per (persona, cohort). Returns jobs enqueued."""
+    """Enqueue a discover job per cadence-driven (persona, cohort).
+
+    Event-triggered cohorts (FR-2.9) are skipped: they activate only when a
+    matching operator event arrives (`make_trigger_handler`)."""
     n = 0
     for persona in runtime.config.personas:
         for cohort in persona.cohorts:
+            if cohort.trigger is not None:
+                continue
             queue.enqueue(
                 conn, "discover",
                 {"tenant": runtime.config.tenant, "persona": persona.id, "cohort": cohort.id},

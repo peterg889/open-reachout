@@ -133,3 +133,256 @@ def test_auto_apply_only_for_budget_shift(conn: Connection, seed: Seed) -> None:
     # hands_off auto path refuses always-human kinds (FR-0.3).
     with pytest.raises(PermissionError, match="always-human"):
         proposals.approve(conn, opp.id, actor="system:discovery", auto=True)
+
+
+# ----------------------------------------------------- goal brainstorming (FR-0.5)
+from pathlib import Path  # noqa: E402
+
+from pydantic import BaseModel  # noqa: E402
+
+from open_reachout.core.config import load_tenant  # noqa: E402
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+
+IDEAS = [
+    {"kind": "seasonal_push", "slug": "patio_season", "summary": "Patio-season venue push",
+     "rationale": "winners cohort converts; spring uplift", "program_delta":
+     "add cohort patio_venues_q2 with monthly_budget 50"},
+    {"kind": "adjacent_audience", "slug": "wineries", "summary": "Winery tasting rooms",
+     "rationale": "same booking motion as winners", "program_delta":
+     "extend filters.categories with winery"},
+]
+
+
+class _StubLLM:
+    """Returns scripted brainstorm ideas; counts calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, task: str, prompt: str, schema: type[BaseModel]) -> BaseModel:
+        assert task == "brainstorm_goals"
+        self.calls += 1
+        return schema.model_validate({"ideas": IDEAS})
+
+
+def _config():  # noqa: ANN202
+    return load_tenant(EXAMPLES / "music-marketplace" / "tenant.yaml")
+
+
+def test_brainstorm_records_and_dedupes(conn: Connection, seed: Seed) -> None:
+    llm = _StubLLM()
+    first = discovery.brainstorm(conn, llm, _config())
+    assert len(first) == 2
+    kinds = {p.kind for p in proposals.list_open(conn, seed.tenant)}
+    assert "goal_brainstorm" in kinds
+    # second run: same slugs are open duplicates -> suppressed
+    assert discovery.brainstorm(conn, llm, _config()) == []
+    assert llm.calls == 2
+
+
+def test_brainstorm_respects_decline_memory(conn: Connection, seed: Seed) -> None:
+    ids = discovery.brainstorm(conn, _StubLLM(), _config())
+    for pid in ids:
+        proposals.decline(conn, pid, actor="operator:cli")
+    # declined directions are remembered (FR-6.1/0.5): nothing re-pitched
+    assert discovery.brainstorm(conn, _StubLLM(), _config()) == []
+
+
+def test_brainstorm_requires_directive_and_stays_human(conn: Connection, seed: Seed) -> None:
+    cfg = _config()
+    raw = cfg.model_dump()
+    raw["brief"]["goals"]["brainstorm"] = None
+    from open_reachout.core.config import TenantConfig
+
+    llm = _StubLLM()
+    assert discovery.brainstorm(conn, llm, TenantConfig.model_validate(raw)) == []
+    assert llm.calls == 0  # no directive -> no model spend
+
+    ids = discovery.brainstorm(conn, llm, cfg)
+    with pytest.raises(PermissionError, match="always-human"):
+        proposals.approve(conn, ids[0], actor="system:discovery", auto=True)
+
+
+# ------------------------------------------------- re-synthesis on drift (FR-0.6)
+REVISED_PERSONAS = [
+    {
+        "id": "small_venue",
+        "description": "Independent cafes and breweries that host live music.",
+        "evidence_signals": ["has_events_calendar"],
+        "value_prop": "free curated local acts",
+        "sequence": {"steps": 2, "gaps_days": [4]},
+        "cohorts": [
+            {"id": "austin_retargeted", "filters": {"metro": "austin"},
+             "monthly_budget": 100, "sources": ["google_places"]}
+        ],
+        "variants": [
+            {"id": "opener_v2", "surface": "opener",
+             "attributes": {"tone": "warm"},
+             "prompt": "Write to {{prospect.first_name}} about "
+                       "{{evidence.calendar_highlight}}. {{persona.voice_rules}}"}
+        ],
+    }
+]
+
+
+class _RevisionLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_prompt = ""
+
+    def complete(self, task: str, prompt: str, schema: type[BaseModel]) -> BaseModel:
+        assert task == "synthesize_program"
+        self.calls += 1
+        self.last_prompt = prompt
+        return schema.model_validate({"personas": REVISED_PERSONAS})
+
+
+def test_no_drift_means_no_revision_and_no_model_spend(
+    conn: Connection, seed: Seed
+) -> None:
+    _add_cohort_prospects(conn, seed, "healthy", contacted=40, converted=8)
+    llm = _RevisionLLM()
+    assert discovery.detect_drift(conn, seed.tenant) == []
+    assert discovery.resynthesize_on_drift(conn, llm, _config()) is None
+    assert llm.calls == 0
+
+
+def test_drift_emits_program_revision_proposal(conn: Connection, seed: Seed) -> None:
+    _add_cohort_prospects(conn, seed, "dead_cohort", contacted=45, converted=0)
+    llm = _RevisionLLM()
+    pid = discovery.resynthesize_on_drift(conn, llm, _config())
+    assert pid is not None
+    assert "dead_cohort" in llm.last_prompt  # drift evidence reached the model
+    prop = next(p for p in proposals.list_open(conn, seed.tenant) if p.id == pid)
+    assert prop.kind == "program_revision"
+    assert prop.payload["personas"][0]["cohorts"][0]["id"] == "austin_retargeted"
+    assert prop.evidence["signals"]
+    # always-human: a revision is a value-prop-level change (FR-0.3)
+    with pytest.raises(PermissionError, match="always-human"):
+        proposals.approve(conn, pid, actor="system:discovery", auto=True)
+    # identical revision is deduped while the first is open
+    assert discovery.resynthesize_on_drift(conn, llm, _config()) is None
+
+
+# ------------------------------------------- campaign-tier research (FR-2.11)
+def test_campaign_note_aggregates_market_view(conn: Connection, seed: Seed) -> None:
+    from open_reachout.core import research
+
+    _add_cohort_prospects(conn, seed, "winners", contacted=20, converted=4)
+    _add_cohort_prospects(conn, seed, "losers", contacted=20, converted=0)
+    note = research.refresh_campaign_note(
+        conn, seed.tenant, research_directive="study venue booking dynamics"
+    )
+    assert note.level == "campaign" and note.subject_id == seed.tenant
+    assert "Strongest cohort so far: winners" in note.summary
+    assert note.findings["cohorts"]["losers"]["converted"] == 0
+    assert note.findings["research_directive"].startswith("study venue")
+    stored = research.latest(conn, seed.tenant, "campaign", seed.tenant)
+    assert stored is not None and stored.summary == note.summary
+
+
+def test_refresh_all_produces_campaign_tier_first(conn: Connection, seed: Seed) -> None:
+    from open_reachout.core import research
+
+    _add_cohort_prospects(conn, seed, "only_cohort", contacted=5, converted=1)
+    n = research.refresh_all(conn, seed.tenant, research_directive="d" * 25)
+    assert n >= 2  # campaign tier + per-cohort notes
+    assert research.latest(conn, seed.tenant, "campaign", seed.tenant) is not None
+
+
+def test_revision_carries_market_note_in_envelope(conn: Connection, seed: Seed) -> None:
+    from open_reachout.core import research
+
+    _add_cohort_prospects(conn, seed, "dead_cohort", contacted=45, converted=0)
+    research.refresh_campaign_note(conn, seed.tenant, research_directive="d" * 25)
+    llm = _RevisionLLM()
+    pid = discovery.resynthesize_on_drift(conn, llm, _config())
+    assert pid is not None
+    assert "<untrusted" in llm.last_prompt          # note travels in the envelope
+    assert "Market view across" in llm.last_prompt  # and carries the market summary
+
+
+# ----------------------------------------------------------- rebalancing (FR-6.5)
+def _floored_config(floor: float = 0.10):  # noqa: ANN202
+    raw = _config().model_dump()
+    raw["personas"][0]["cohorts"][0]["floors"] = {
+        "conversion_rate": floor, "min_trials": 25,
+    }
+    from open_reachout.core.config import TenantConfig
+
+    return TenantConfig.model_validate(raw)
+
+
+def test_rebalance_flags_only_with_statistical_support(
+    conn: Connection, seed: Seed
+) -> None:
+    cfg = _floored_config()
+    cohort = cfg.personas[0].cohorts[0].id
+    # below min_trials: never flagged, however bad the rate
+    _add_cohort_prospects(conn, seed, cohort, contacted=10, converted=0)
+    assert discovery.rebalance_scan(conn, cfg) == []
+    # enough trials, rate confidently below the 10% floor
+    _add_cohort_prospects(conn, seed, cohort, contacted=50, converted=0)
+    ids = discovery.rebalance_scan(conn, cfg)
+    assert len(ids) == 1
+    prop = next(p for p in proposals.list_open(conn, seed.tenant) if p.id == ids[0])
+    assert prop.kind == "rebalance"
+    assert prop.payload["action"] == "pause"  # no stronger cohort to shift toward
+    assert "upper bound" in prop.summary
+    # dedupe: scanning again while the proposal is open files nothing new
+    assert discovery.rebalance_scan(conn, cfg) == []
+
+
+def test_healthy_cohort_above_floor_not_flagged(conn: Connection, seed: Seed) -> None:
+    cfg = _floored_config(floor=0.05)
+    cohort = cfg.personas[0].cohorts[0].id
+    _add_cohort_prospects(conn, seed, cohort, contacted=60, converted=9)  # 15%
+    assert discovery.rebalance_scan(conn, cfg) == []
+
+
+def test_rebalance_shifts_toward_winner_and_auto_applies(
+    conn: Connection, seed: Seed
+) -> None:
+    from datetime import UTC, datetime
+
+    cfg = _floored_config()
+    weak = cfg.personas[0].cohorts[0].id
+    _add_cohort_prospects(conn, seed, weak, contacted=60, converted=0)
+    _add_cohort_prospects(conn, seed, "strong_cohort", contacted=40, converted=8)
+    (pid,) = discovery.rebalance_scan(conn, cfg)
+    prop = next(p for p in proposals.list_open(conn, seed.tenant) if p.id == pid)
+    assert prop.payload["action"] == "shift"
+    assert prop.payload["to_cohort"] == "strong_cohort"
+    # rebalance sits inside the hands_off envelope: auto-apply is permitted
+    assert proposals.approve(conn, pid, actor="system:discovery", auto=True)
+    period = datetime.now(UTC).strftime("%Y-%m")
+    caps = dict(conn.execute(
+        text("""SELECT scope_id, cap FROM counters
+                WHERE scope_type='cohort_month' AND period=:p
+                  AND scope_id IN (:a, :b)"""),
+        {"p": period, "a": weak, "b": "strong_cohort"},
+    ).fetchall())
+    assert caps[weak] < 100 and caps["strong_cohort"] > 100
+
+
+# ----------------------------------------- auto_launch_within_budget (FR-6.2)
+def test_auto_review_applies_envelope_kinds_only(conn: Connection, seed: Seed) -> None:
+    _add_cohort_prospects(conn, seed, "winners", contacted=40, converted=8)
+    _add_cohort_prospects(conn, seed, "losers", contacted=40, converted=1)
+    discovery.analyze(conn, seed.tenant)  # files a budget_shift
+    discovery.brainstorm(conn, _StubLLM(), _config())  # files always-human kinds
+
+    # propose-mode tenants: the gate does nothing
+    assert proposals.auto_review(conn, seed.tenant, "propose") == []
+
+    applied = proposals.auto_review(conn, seed.tenant, "auto_within_budget")
+    assert len(applied) == 1  # the budget_shift; brainstorms stay human
+    remaining = {p.kind for p in proposals.list_open(conn, seed.tenant)}
+    assert "goal_brainstorm" in remaining
+    assert "budget_shift" not in remaining
+    actor = conn.execute(
+        text("SELECT resolved_by FROM proposals WHERE id = CAST(:i AS uuid)"),
+        {"i": applied[0]},
+    ).scalar()
+    assert actor == "system:autonomy"

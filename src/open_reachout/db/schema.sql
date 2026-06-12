@@ -27,8 +27,10 @@ CREATE TABLE IF NOT EXISTS entities (
   active_sequence_touch_id uuid,
   touches_12mo int NOT NULL DEFAULT 0,
   status       text NOT NULL DEFAULT 'active',
+  referral_asked boolean NOT NULL DEFAULT false,  -- FR-4.4: once per entity, ever
   created_at   timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS referral_asked boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS entity_keys (
   entity_id  uuid NOT NULL REFERENCES entities(id),
@@ -256,6 +258,61 @@ CREATE TABLE IF NOT EXISTS escalations (
   reason       text NOT NULL,
   payload      jsonb NOT NULL DEFAULT '{}'::jsonb,
   status       text NOT NULL DEFAULT 'open',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  resolved_at  timestamptz,
+  resolved_by  text
+);
+
+-- Objection library (PRD FR-4.3, spec 8.14): taxonomized objections mined
+-- from replies. The objections ARE the market research.
+CREATE TABLE IF NOT EXISTS objections (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant     text NOT NULL,
+  class      text NOT NULL,   -- price|trust|timing|already_solved|other
+  reply_id   uuid REFERENCES replies(id),
+  cohort_id  text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Sender profiles (PRD FR-0.7, spec 8.10): researched facts about the SENDER,
+-- proposed by the agent, trusted only after one-time human approval — the only
+-- path by which web-derived content becomes trusted-class.
+CREATE TABLE IF NOT EXISTS sender_profiles (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant      text NOT NULL,
+  facts       jsonb NOT NULL,                  -- [{slug, fact, source_url}]
+  status      text NOT NULL DEFAULT 'proposed', -- proposed|approved|superseded
+  approved_by text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz
+);
+
+-- Versioned claim registry (PRD FR-3.2 allowlist mode, spec 13.5): the
+-- audited record of approved product-claim phrases; config is the source,
+-- this table is the history. decision_traces stamps the active version.
+CREATE TABLE IF NOT EXISTS claim_registry (
+  tenant      text NOT NULL,
+  claim_id    text NOT NULL,
+  version     text NOT NULL,
+  claim_text  text NOT NULL,
+  status      text NOT NULL DEFAULT 'approved',  -- approved|retired
+  approved_by text NOT NULL DEFAULT 'config',
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant, claim_id, version)
+);
+
+-- Human tasks as first-class sequence steps (PRD FR-3.6, spec 8.13): the
+-- framework researches and briefs; the operator does the off-channel touch.
+-- A completed task counts against entity frequency caps like any touch.
+CREATE TABLE IF NOT EXISTS human_tasks (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant       text NOT NULL,
+  prospect_id  uuid NOT NULL REFERENCES prospects(id),
+  touch_id     uuid REFERENCES touches(id),
+  instruction  text NOT NULL,
+  brief        text NOT NULL,
+  status       text NOT NULL DEFAULT 'pending',  -- pending|done|skipped|expired
+  outcome_note text,
   created_at   timestamptz NOT NULL DEFAULT now(),
   resolved_at  timestamptz,
   resolved_by  text

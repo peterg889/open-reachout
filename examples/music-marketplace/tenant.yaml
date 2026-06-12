@@ -59,6 +59,18 @@ personas:
           about {{evidence.calendar_highlight}} - never generic flattery.
           Then one sentence on {{persona.value_prop}}. Close with a single
           easy question about their booking process. {{persona.voice_rules}}
+      # Follow-ups are their own variant surface (FR-3.9): a new evidence-
+      # grounded angle, never a resend or a bump.
+      - id: followup_new_angle
+        surface: followup_strategy
+        attributes: { tone: warm, hook: different_evidence, cta: soft_offer }
+        prompt: |
+          Write a short follow-up email to {{prospect.first_name}} at
+          {{prospect.org_name}}. Bring ONE genuinely new angle grounded in
+          {{evidence.calendar_highlight}} - a different facet than any prior
+          note, never "just checking in". One sentence on
+          {{persona.value_prop}}, then a no-pressure close.
+          {{persona.voice_rules}}
 
   - id: gigging_band
     description: >

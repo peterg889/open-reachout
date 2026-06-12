@@ -78,6 +78,26 @@ class PgGateStore:
                 return False
         return True
 
+    # -- gate 4f: sequence continuation (FR-3.5), row-locked --------------------
+    def sequence_continuation_ok(self, entity_id: str, prospect_id: str) -> bool:
+        row = self.conn.execute(
+            text(
+                """
+                SELECT e.touches_12mo, tc.prospect_id
+                FROM entities e
+                LEFT JOIN touches tc ON tc.id = e.active_sequence_touch_id
+                WHERE e.id = CAST(:e AS uuid) FOR UPDATE OF e
+                """
+            ),
+            {"e": entity_id},
+        ).fetchone()
+        if row is None:
+            return False  # unknown entity: fail closed
+        touches_12mo, active_prospect = row
+        if active_prospect is None or str(active_prospect) != prospect_id:
+            return False  # not this prospect's sequence (stopped or superseded)
+        return bool(touches_12mo < self.annual_cap)
+
     # -- gate 5: volume budgets (I-8), guarded atomic increments ---------------
     def try_consume_budget(self, tenant: str, touch: DraftTouch) -> bool:
         for scope_type, scope_id in (
@@ -201,7 +221,9 @@ class PgGateStore:
         ).rowcount
         if not claimed:
             raise RuntimeError(f"touch {touch.touch_id} not in 'drafted' state")
-        if touch.profile is GateProfile.COLD:
+        if touch.profile in (GateProfile.COLD, GateProfile.FOLLOWUP):
+            # COLD opens the sequence; FOLLOWUP advances it. Both are contact:
+            # the entity's frequency-governance state moves identically (I-7).
             self.conn.execute(
                 text(
                     """
@@ -217,13 +239,15 @@ class PgGateStore:
         self.conn.execute(
             text(
                 """
-                INSERT INTO decision_traces (touch_id, gate_results)
-                VALUES (CAST(:i AS uuid), CAST(:g AS jsonb))
+                INSERT INTO decision_traces (touch_id, gate_results, claim_registry_version)
+                VALUES (CAST(:i AS uuid), CAST(:g AS jsonb), :cv)
                 ON CONFLICT (touch_id)
-                DO UPDATE SET gate_results = EXCLUDED.gate_results
+                DO UPDATE SET gate_results = EXCLUDED.gate_results,
+                              claim_registry_version = EXCLUDED.claim_registry_version
                 """
             ),
-            {"i": touch.touch_id, "g": json.dumps(gate_results)},
+            {"i": touch.touch_id, "g": json.dumps(gate_results),
+             "cv": touch.validator_ctx.claim_registry_version},
         )
         self.conn.execute(
             text(

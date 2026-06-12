@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from open_reachout.core import attribution, control, events, forget
+from open_reachout.core import queue as job_queue
 from open_reachout.core.interfaces import SendingProvider, WebhookVerificationError
 
 ATTRIBUTION_KEY_ENV = "OR_ATTRIBUTION_KEY"
@@ -78,8 +79,10 @@ def create_app(
     app = FastAPI(title="Open Reachout", docs_url=None, redoc_url=None)
 
     from open_reachout.api.dashboard import build_dashboard_router
+    from open_reachout.api.manage import build_manage_router
 
     app.include_router(build_dashboard_router(engine))
+    app.include_router(build_manage_router(engine))  # FR-9.1/9.4 (manage:write)
 
     def require(scope: str):
         def check(authorization: str = Header(default="")) -> ApiToken:
@@ -144,8 +147,14 @@ def create_app(
                 {"e": body.event_type, "s": json.dumps(body.selector),
                  "p": json.dumps(body.payload), "k": body.dedupe_key},
             ).fetchone()
-        # Trigger-matching campaigns (FR-2.9) land post-0.1; events are
-        # durably recorded now so operator integrations can ship today.
+            if row is not None:
+                # FR-2.9: hand off to the trigger queue; the worker matches
+                # `trigger: event` cohorts and starts sequences through the
+                # full gate set. Duplicate events (dedupe_key) never re-fire.
+                job_queue.enqueue(
+                    conn, "trigger", {"event_id": str(row[0])},
+                    idempotency_key=f"trigger:{row[0]}",
+                )
         return {"recorded": row is not None, "id": str(row[0]) if row else None}
 
     @app.get("/v1/funnel")

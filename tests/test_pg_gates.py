@@ -169,3 +169,45 @@ def test_unverified_confidence_bucket_is_unsendable(conn: Connection, seed: Seed
     conn.execute(text("UPDATE prospects SET email_confidence = 'risky'"))
     result = claim(PgGateStore(conn), draft_touch(seed))
     assert isinstance(result, Refusal) and result.reason is RefusalReason.CONFIDENCE
+
+
+def test_claim_stamps_registry_version_in_trace(conn: Connection, seed: Seed) -> None:
+    """FR-3.2/FR-8.5: every claimed touch records the active claims posture."""
+    result = claim(PgGateStore(conn), draft_touch(seed))
+    assert isinstance(result, ClaimedTouch)
+    version = conn.execute(
+        text(
+            """SELECT claim_registry_version FROM decision_traces
+               WHERE touch_id = CAST(:i AS uuid)"""
+        ),
+        {"i": seed.touch_id},
+    ).scalar()
+    assert version == "deny-pack@1"
+
+
+def test_ensure_registry_records_allowlist_versions(conn: Connection, seed: Seed) -> None:
+    from open_reachout.core.compliance.claims import ensure_registry
+    from open_reachout.core.config import AboutUs, IdentitySpec
+
+    identity = IdentitySpec(sender="Maya Reyes, StageMatch",
+                            physical_address="1 Main St, Austin TX")
+    about = AboutUs(name="StageMatch", what_we_do="free venue accounts",
+                    identity=identity, claims_mode="allowlist",
+                    approved_claims=["free venue accounts", "band membership $9/mo"])
+    v1 = ensure_registry(conn, seed.tenant, about)
+    assert v1.startswith("allowlist@")
+    rows = conn.execute(
+        text("SELECT claim_text FROM claim_registry WHERE tenant = :t AND version = :v"),
+        {"t": seed.tenant, "v": v1},
+    ).fetchall()
+    assert {r[0] for r in rows} == {"free venue accounts", "band membership $9/mo"}
+    # idempotent re-sync; a changed set is a NEW version, history intact
+    assert ensure_registry(conn, seed.tenant, about) == v1
+    about2 = about.model_copy(update={"approved_claims": ["free venue accounts"]})
+    v2 = ensure_registry(conn, seed.tenant, about2)
+    assert v2 != v1
+    versions = conn.execute(
+        text("SELECT DISTINCT version FROM claim_registry WHERE tenant = :t"),
+        {"t": seed.tenant},
+    ).fetchall()
+    assert len(versions) == 2

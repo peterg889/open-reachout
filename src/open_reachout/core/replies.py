@@ -46,6 +46,7 @@ class RouteDecision:
     confidence: float
     reason: str
     deterministic: bool = False  # True when no LLM was consulted
+    objection_class: str | None = None  # FR-4.3 taxonomy
 
 
 _CLASSIFY_FRAME = f"""You classify one reply to a cold outreach email.
@@ -129,4 +130,5 @@ def route(
             Action.ESCALATE, output.intent, output.confidence,
             f"action {action} not in tenant allowlist",
         )
-    return RouteDecision(action, output.intent, output.confidence, "classified")
+    return RouteDecision(action, output.intent, output.confidence, "classified",
+                         objection_class=output.objection_class)

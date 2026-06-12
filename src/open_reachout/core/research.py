@@ -169,7 +169,76 @@ def refresh_strategy_notes(
     return notes
 
 
-def refresh_all(conn: Connection, tenant: str, llm: LLMBackend | None = None) -> int:
+def refresh_campaign_note(
+    conn: Connection, tenant: str, llm: LLMBackend | None = None,
+    research_directive: str = "",
+) -> Note:
+    """Campaign/market tier (FR-2.11, spec 8.10): tenant-wide dynamics, mined
+    BEFORE cohort work so market research flows into cohort design. The
+    deterministic core aggregates the deployment's own cross-cohort outcomes;
+    an LLM narrative interprets them against the Brief's `research` directive."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT p.cohort_id,
+                   count(*) FILTER (WHERE p.state NOT IN ('discovered','enriched',
+                       'qualified','queued')) AS reached,
+                   count(*) FILTER (WHERE p.state = 'converted') AS converted
+            FROM prospects p JOIN tenants t ON t.id = p.tenant_id
+            WHERE t.slug = :t GROUP BY 1 ORDER BY 2 DESC
+            """
+        ),
+        {"t": tenant},
+    ).fetchall()
+    intents = conn.execute(
+        text(
+            """
+            SELECT coalesce(r.intent, 'unclassified'), count(*) FROM replies r
+            JOIN prospects p ON p.id = r.prospect_id
+            JOIN tenants t ON t.id = p.tenant_id
+            WHERE t.slug = :t GROUP BY 1 ORDER BY 2 DESC
+            """
+        ),
+        {"t": tenant},
+    ).fetchall()
+    findings: dict[str, object] = {
+        "cohorts": {r[0]: {"reached": r[1], "converted": r[2]} for r in rows},
+        "reply_intents": {str(k): int(v) for k, v in intents},
+        "research_directive": research_directive,
+    }
+    total_reached = sum(r[1] for r in rows)
+    total_converted = sum(r[2] for r in rows)
+    summary = (
+        f"Market view across {len(rows)} cohort(s): {total_reached} reached, "
+        f"{total_converted} converted."
+    )
+    if rows:
+        best = max(rows, key=lambda r: (r[2] / r[1]) if r[1] else 0.0)
+        summary += f" Strongest cohort so far: {best[0]}."
+    if llm is not None:
+        narrative = llm.complete(
+            "discovery_research",
+            "Interpret this tenant's cross-cohort outreach data as MARKET "
+            "research, guided by the operator's research directive below. What "
+            "market dynamics do the numbers suggest? Which kinds of prospects "
+            "respond? Do not invent numbers.\n\n"
+            f"Research directive: {research_directive or '(none)'}\n\n"
+            f"Data:\n{json.dumps(findings, indent=2)}",
+            ResearchNarrative,
+        )
+        assert isinstance(narrative, ResearchNarrative)
+        if not narrative.injection_suspected:
+            summary = narrative.summary + " | " + summary
+            findings["recommendations"] = narrative.recommendations
+    note = Note("campaign", tenant, summary, findings)
+    _store(conn, tenant, note)
+    return note
+
+
+def refresh_all(
+    conn: Connection, tenant: str, llm: LLMBackend | None = None,
+    research_directive: str = "",
+) -> int:
     cohort_ids = [
         r[0]
         for r in conn.execute(
@@ -182,7 +251,9 @@ def refresh_all(conn: Connection, tenant: str, llm: LLMBackend | None = None) ->
             {"t": tenant},
         ).fetchall()
     ]
-    n = 0
+    # Campaign/market tier first: market research flows into cohort design.
+    refresh_campaign_note(conn, tenant, llm, research_directive=research_directive)
+    n = 1
     for cohort_id in cohort_ids:
         refresh_cohort_note(conn, tenant, cohort_id, llm)
         n += 1

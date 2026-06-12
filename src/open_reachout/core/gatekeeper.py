@@ -30,6 +30,11 @@ class RefusalReason(StrEnum):
 class GateProfile(StrEnum):
     COLD = "cold"  # full gate set
     REPLY = "reply"  # agentic replies: skip frequency/budget volume gates only
+    #: Drip follow-ups (FR-3.5): a continuation of the entity's ACTIVE
+    #: sequence — the cold frequency gate would refuse it (one active sequence
+    #: is exactly what it enforces). Continuation legitimacy is its own gate;
+    #: budget is consumed per step; halt/suppression/validators bind as ever.
+    FOLLOWUP = "followup"
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,7 @@ class DraftTouch:
     profile: GateProfile
     validator_ctx: ValidatorContext
     cohort_id: str = ""  # budget scope (I-8); unused by REPLY profile
+    prospect_id: str = ""  # FOLLOWUP continuation check (FR-3.5)
 
 
 class GateStore(Protocol):
@@ -88,6 +94,7 @@ class GateStore(Protocol):
     def halted_scopes(self, tenant: str) -> list[str]: ...
     def is_suppressed(self, email_canonical: str, tenant: str) -> bool: ...
     def frequency_ok(self, entity_id: str, tenant: str) -> bool: ...
+    def sequence_continuation_ok(self, entity_id: str, prospect_id: str) -> bool: ...
     def try_consume_budget(self, tenant: str, touch: DraftTouch) -> bool: ...
     def release_budget(self, tenant: str, touch: DraftTouch) -> None: ...
     def pick_mailbox(self, tenant: str) -> str | None: ...
@@ -136,8 +143,16 @@ def claim(store: GateStore, touch: DraftTouch) -> ClaimedTouch | Refusal:
             if not store.frequency_ok(touch.entity_id, touch.tenant):
                 return _refuse(results, "frequency", RefusalReason.FREQUENCY, terminal=True)
             results["frequency"] = "pass"
+        elif touch.profile is GateProfile.FOLLOWUP:
+            # 4f. sequence continuation (I-7): the entity's active sequence must
+            # be THIS prospect's, and the annual touch ceiling still binds.
+            if not store.sequence_continuation_ok(touch.entity_id, touch.prospect_id):
+                return _refuse(results, "frequency", RefusalReason.FREQUENCY, terminal=True)
+            results["frequency"] = "pass(continuation)"
 
-            # 5. volume budgets (I-8) — consumes; everything after must release on failure
+        if touch.profile in (GateProfile.COLD, GateProfile.FOLLOWUP):
+            # 5. volume budgets (I-8) — consumes; everything after must release
+            # on failure. Budget counts each step (FR-3.5).
             if not store.try_consume_budget(touch.tenant, touch):
                 return _refuse(results, "budget", RefusalReason.BUDGET, terminal=False)
             results["budget"] = "pass"
@@ -145,14 +160,14 @@ def claim(store: GateStore, touch: DraftTouch) -> ClaimedTouch | Refusal:
         # 6. mailbox capacity
         mailbox = store.pick_mailbox(touch.tenant)
         if mailbox is None:
-            if touch.profile is GateProfile.COLD:
+            if touch.profile in (GateProfile.COLD, GateProfile.FOLLOWUP):
                 store.release_budget(touch.tenant, touch)
             return _refuse(results, "mailbox", RefusalReason.NO_CAPACITY, terminal=False)
         results["mailbox"] = mailbox
 
         # 7. verification confidence (FR-2.6)
         if not store.confidence_sendable(touch.email_canonical, touch.tenant):
-            if touch.profile is GateProfile.COLD:
+            if touch.profile in (GateProfile.COLD, GateProfile.FOLLOWUP):
                 store.release_budget(touch.tenant, touch)
             return _refuse(results, "confidence", RefusalReason.CONFIDENCE, terminal=True)
         results["confidence"] = "pass"

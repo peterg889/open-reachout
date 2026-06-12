@@ -53,4 +53,8 @@ class ClassifyReplyOutput(_Out):
         "other",
     ]
     confidence: float = Field(ge=0.0, le=1.0)
+    #: FR-4.3 objection taxonomy; set when intent == "objection".
+    objection_class: Literal["price", "trust", "timing", "already_solved", "other"] | None = (
+        None
+    )
     sentiment: float = Field(ge=-1.0, le=1.0, default=0.0)

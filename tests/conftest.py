@@ -10,10 +10,12 @@ from sqlalchemy.engine import Connection, Engine
 DEFAULT_TEST_DSN = "postgresql+psycopg://orx:orx@127.0.0.1/orx_test"
 
 _TABLES = (
-    "decision_traces", "replies", "touches", "evidence_facts", "prospects",
+    "decision_traces", "objections", "replies", "human_tasks", "touches",
+    "evidence_facts", "prospects",
     "entity_keys", "entities", "suppressions", "forget_tombstones",
     "control_flags", "counters", "spend_ledger", "provider_events",
-    "audit_events", "jobs", "mailboxes", "config_versions", "tenants",
+    "audit_events", "jobs", "mailboxes", "config_versions", "tenants", "claim_registry",
+    "sender_profiles",
     "variant_stats", "escalations", "operator_events", "proposals", "research_notes",
 )
 

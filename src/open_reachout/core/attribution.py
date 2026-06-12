@@ -73,6 +73,12 @@ def record_conversion(conn: Connection, touch_id: str) -> bool:
         return False  # e.g. unsubscribed-then-clicked: conversion doesn't undo an exit
     if variant_id:
         record_success(conn, tenant, variant_id)  # conversions are the real metric
+    # FR-4.4: conversion is a configured positive event — eligible personas may
+    # make their one referral ask (the handler re-checks eligibility + flag).
+    from open_reachout.core import queue
+
+    queue.enqueue(conn, "referral", {"prospect_id": str(prospect_id)},
+                  idempotency_key=f"referral:{prospect_id}")
     conn.execute(
         text(
             """

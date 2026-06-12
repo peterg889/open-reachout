@@ -23,7 +23,8 @@ from open_reachout.core.queue import Job
 #: with later stages ahead of earlier ones so in-flight prospects finish
 #: before new discovery floods the queues.
 QUEUE_PRIORITY = (
-    "control", "classify", "deliver", "compose", "qualify", "enrich", "discover",
+    "control", "trigger", "classify", "deliver", "compose", "referral", "reengage",
+    "qualify", "enrich", "discover",
 )
 
 Handler = Callable[[Connection, Job], None]
