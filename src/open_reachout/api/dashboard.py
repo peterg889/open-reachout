@@ -13,7 +13,7 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine, Row
 
 from open_reachout.core import escalations, metrics, proposals, research
 
@@ -85,6 +85,9 @@ table tr:hover td{background:#faf5e9}
   border-radius:4px;min-width:3px}
 pre{white-space:pre-wrap;font-family:inherit;margin:0}
 .small{font-size:.8rem;color:var(--muted)}
+.banner{border:1px solid #e0b25a;background:#fdf3dd;border-left:5px solid var(--accent);
+  border-radius:8px;padding:12px 16px;margin:16px 0;font-size:.97rem}
+.banner b{color:#7a5a10}
 .crumb{font-size:.85rem;color:var(--muted);margin:0 0 14px}
 .crumb a{color:var(--muted)}
 .crumb a:hover{color:var(--green-dark)}
@@ -152,7 +155,77 @@ def _named(slug: object) -> str:
     return f"{_e(_friendly(slug))} <span class='small'>({_e(slug)})</span>"
 
 
-def _ledger_rows(conn, prospect_id: str) -> str:  # noqa: ANN001
+#: Touch statuses in operator language: what is this email DOING right now?
+_TOUCH_STATUS = {
+    "pending_review": ("awaiting your approval", "warm"),
+    "drafted": ("ready to send", "live"),
+    "claimed": ("sending", "live"),
+    "dispatched": ("sent", "good"),
+    "sent": ("sent", "good"),
+    "delivered": ("delivered", "good"),
+    "bounced": ("bounced", "exit"),
+    "failed": ("failed", "exit"),
+    "released": ("not sent — released by a gate", "exit"),
+    "pending_human": ("waiting on a human task", "warm"),
+}
+
+
+def _touch_status(status: object) -> str:
+    label, cls = _TOUCH_STATUS.get(str(status), (str(status), "idle"))
+    return f"<span class='state {cls}'>{_e(label)}</span>"
+
+
+def _outbox(
+    conn: Connection, tenant: str
+) -> tuple[dict[str, int], list[Row[tuple]]]:
+    counts: dict[str, int] = {
+        str(k): int(v) for k, v in conn.execute(
+        text(
+            """
+            SELECT tc.status, count(*) FROM touches tc
+            JOIN prospects p ON p.id = tc.prospect_id
+            JOIN tenants t ON t.id = p.tenant_id
+            WHERE t.slug = :t GROUP BY 1
+            """
+        ),
+        {"t": tenant},
+    ).fetchall()
+    }
+    ready = conn.execute(
+        text(
+            """
+            SELECT tc.id, en.display_name, p.id, p.cohort_id, tc.subject, tc.status,
+                   tc.kind, tc.step_index
+            FROM touches tc
+            JOIN prospects p ON p.id = tc.prospect_id
+            JOIN entities en ON en.id = p.entity_id
+            JOIN tenants t ON t.id = p.tenant_id
+            WHERE t.slug = :t AND tc.status IN ('drafted', 'pending_review')
+            ORDER BY p.cohort_id, en.display_name
+            """
+        ),
+        {"t": tenant},
+    ).fetchall()
+    return counts, list(ready)
+
+
+def _halt_banner(conn: Connection, tenant: str) -> str:
+    scopes = [r[0] for r in conn.execute(
+        text("SELECT scope FROM control_flags WHERE scope IN ('global', :t)"),
+        {"t": tenant},
+    ).fetchall()]
+    if not scopes:
+        return ""
+    where = "everything" if "global" in scopes else "this campaign"
+    return (
+        f"<div class='banner'><b>⏸ Sending is HALTED for {where}.</b> "
+        "Emails marked <i>ready to send</i> will wait at the gatekeeper until "
+        "a human runs <code>reachout resume</code> — nothing goes out while "
+        "this banner is visible.</div>"
+    )
+
+
+def _ledger_rows(conn: Connection, prospect_id: str) -> str:
     """The prospect's state ledger: every transition with its reason, plus
     escalations — the answer to 'why is this prospect in this state?'."""
     rows = conn.execute(
@@ -227,11 +300,14 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             for tenant in tenants:
                 f = metrics.funnel(conn, tenant)
                 cohort_rows = metrics.cohorts(conn, tenant)
+                counts, _ready = _outbox(conn, tenant)
+                banner = _halt_banner(conn, tenant)
                 cards = _cards([
+                    ("ready to send", counts.get("drafted", 0)
+                     + counts.get("pending_review", 0)),
                     ("reached (contacted)", f.contacted),
                     ("replies", f.replies),
                     ("positive replies", f.positive_replies),
-                    ("in conversation", f.in_conversation),
                     ("converted", f.converted),
                     ("conversion", f"{f.conversion_rate:.0%}" if f.contacted else "—"),
                 ])
@@ -261,8 +337,8 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
                 sections.append(
                     f"<h2><a href='/dashboard/campaign/{_e(tenant)}'>"
                     f"{_e(_friendly(tenant))}</a> "
-                    f"<span class='small'>campaign — click for research &amp; "
-                    f"cohorts</span></h2>{cards}"
+                    f"<span class='small'>campaign — click for outbox, research "
+                    f"&amp; cohorts</span></h2>{banner}{cards}"
                     f"<h2>Cohorts the system is working</h2>"
                     f"<table><tr><th>cohort</th><th>persona</th><th>members</th>"
                     f"<th>contacted</th><th>replies</th><th>converted</th></tr>"
@@ -287,12 +363,26 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             winloss = research.latest(conn, tenant, "winloss", tenant)
             escal = len(escalations.list_open(conn, tenant))
             props = len(proposals.list_open(conn, tenant))
+            counts, ready = _outbox(conn, tenant)
+            banner = _halt_banner(conn, tenant)
         cards = _cards([
-            ("reached (contacted)", f.contacted), ("replies", f.replies),
-            ("converted", f.converted),
-            ("conversion", f"{f.conversion_rate:.0%}" if f.contacted else "—"),
+            ("ready to send", counts.get("drafted", 0)),
+            ("awaiting your approval", counts.get("pending_review", 0)),
+            ("sent", counts.get("dispatched", 0) + counts.get("sent", 0)
+             + counts.get("delivered", 0)),
+            ("replies", f.replies), ("converted", f.converted),
             ("open escalations", escal), ("open proposals", props),
         ])
+        outbox_rows = "".join(
+            f"<tr><td><a href='/dashboard/member/{pid}?tenant={_e(tenant)}'>"
+            f"{_e(name)}</a></td>"
+            f"<td class='small'>{_e(_friendly(cohort))}</td>"
+            f"<td>{_e(subject or '(no subject)')}"
+            + (f" <span class='tag'>follow-up {step}</span>" if step else "")
+            + f"</td><td>{_touch_status(status)}</td></tr>"
+            for _tid, name, pid, cohort, subject, status, _kind, step in ready
+        ) or ("<tr><td colspan='4' class='small'>(outbox empty — nothing is "
+              "waiting to go out)</td></tr>")
         research_html = (
             f"<div class='note'><b>Campaign research — market view</b> "
             f"<span class='small'>({market.created_at:%Y-%m-%d %H:%M})</span>"
@@ -318,7 +408,11 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
         crumb = f"<p class='crumb'><a href='/dashboard'>overview</a> / {_e(tenant)}</p>"
         return _page(
             f"Campaign: {_friendly(tenant)}",
-            cards + research_html
+            banner + cards
+            + "<h2>Outbox — emails ready to send &amp; awaiting approval</h2>"
+            + "<table><tr><th>to</th><th>cohort</th><th>subject</th>"
+              "<th>status</th></tr>" + outbox_rows + "</table>"
+            + research_html
             + "<h2>Cohorts in this campaign</h2>"
             + "<table><tr><th>cohort</th><th>persona</th><th>members</th>"
               "<th>contacted</th><th>replies</th><th>converted</th></tr>"
@@ -411,8 +505,9 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
         ) or "<tr><td colspan='3'>(no research yet)</td></tr>"
         convo_html = "".join(
             f"<div class='msg {'in' if c.direction == 'in' else ''}'>"
-            f"<div class='meta'>{'⟵ reply' if c.direction == 'in' else '⟶ sent'}"
-            f" · {_e(c.when or 'draft')} · {_e(c.status or '')}"
+            f"<div class='meta'>{'⟵ reply' if c.direction == 'in' else '⟶ outbound'}"
+            f" · {_e(c.when or 'draft')} · "
+            + (_touch_status(c.status) if c.direction != 'in' and c.status else "")
             + (f" · variant {_e(c.variant_id)}" if c.variant_id else "")
             + "</div>"
             + (f"<b>{_e(c.subject)}</b><br>" if c.subject else "")

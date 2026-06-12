@@ -126,3 +126,29 @@ def test_friendly_names_render_with_slug_secondary(
     page = client.get("/dashboard").text
     assert "Austin Venues — 2026 Q3" in page  # friendly
     assert "austin_venues_2026q3" in page     # raw id stays discoverable
+
+
+def test_campaign_outbox_shows_ready_emails_and_halt_banner(
+    demo: dict[str, int], client: TestClient, pg_engine: Engine
+) -> None:
+    from open_reachout.core import control, sendpath
+    from open_reachout.core.compliance.validators import Draft, content_hash
+
+    with pg_engine.begin() as conn:
+        pid = conn.execute(text("""SELECT p.id FROM prospects p
+            JOIN tenants t ON t.id = p.tenant_id
+            WHERE t.slug = 'stagematch' LIMIT 1""")).scalar()
+        draft = Draft(subject="A Thursday idea", body="b")
+        sendpath.queue_draft(
+            conn, prospect_id=str(pid), campaign_id="c", variant_id="v",
+            step_index=0, kind="cold", draft=draft,
+            content_hash=content_hash(draft),
+        )
+        control.halt(conn, scope="stagematch", actor="operator:test")
+    page = client.get("/dashboard/campaign/stagematch").text
+    assert "Outbox" in page
+    assert "ready to send" in page
+    assert "A Thursday idea" in page
+    assert "Sending is HALTED" in page          # the why-it-isn't-going banner
+    overview = client.get("/dashboard").text
+    assert "ready to send" in overview
