@@ -66,6 +66,11 @@ class AboutUs(_Model):
     links: dict[str, str] = Field(default_factory=dict)
     identity: IdentitySpec
     assets: list[AssetSpec] = Field(default_factory=list)
+    faq: dict[str, str] = Field(
+        default_factory=dict,
+        description="FR-4.2: the ONLY knowledge the reply agent may answer "
+        "from (question -> operator-authored answer); claims-linted",
+    )
     claims_mode: Literal["denylist", "allowlist"] = "denylist"
     sector_sensitivity: Literal["none", "healthcare"] = Field(
         default="none",
@@ -124,6 +129,17 @@ class AboutUs(_Model):
                         f"asset {asset.id!r}: unregistered claim(s): {flagged}"
                     )
         return self
+
+    @field_validator("faq")
+    @classmethod
+    def _faq_linted(cls, v: dict[str, str]) -> dict[str, str]:
+        from open_reachout.core.compliance.validators import forbidden_hits
+
+        for question, answer in v.items():
+            hits = forbidden_hits(answer)
+            if hits:
+                raise ValueError(f"faq {question!r}: forbidden claim(s): {hits}")
+        return v
 
     @field_validator("links")
     @classmethod

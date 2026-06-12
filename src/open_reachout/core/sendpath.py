@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from open_reachout.core import queue
+from open_reachout.core import attribution, queue
 from open_reachout.core.compliance.validators import Draft, ValidatorContext
+from open_reachout.core.compliance.validators import content_hash as compute_content_hash
 from open_reachout.core.gatekeeper import ClaimedTouch, GateProfile, Refusal, claim
 from open_reachout.core.gatekeeper import DraftTouch as GateDraft
 from open_reachout.core.interfaces import SendingProvider
@@ -50,6 +51,15 @@ def queue_draft(
     approve past suppression or budget — approval just re-enters the claim path.
     """
     touch_id = str(uuid.uuid4())
+    key = attribution.key_from_env()
+    if key is not None and kind != "human_task":
+        # FR-8.3: every outbound link carries this touch's signed token —
+        # rewritten BEFORE hashing so validate-then-bind covers the final body.
+        tokenized = attribution.tokenize_links(draft.body, touch_id, key)
+        if tokenized != draft.body:
+            draft = Draft(subject=draft.subject, body=tokenized,
+                          step_index=draft.step_index)
+            content_hash = compute_content_hash(draft)
     hold = False
     if approve_first > 0:
         conn.execute(

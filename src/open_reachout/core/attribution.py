@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
+import re
 import uuid
 
 from sqlalchemy import text
@@ -20,6 +22,30 @@ from open_reachout.core.states import ProspectState, TransitionError
 from open_reachout.stats.persistence import record_success
 
 MAC_LEN = 12
+ATTRIBUTION_KEY_ENV = "OR_ATTRIBUTION_KEY"
+
+_URL_RE = re.compile(r"https?://[^\s>\")\]]+", re.IGNORECASE)
+
+
+def key_from_env() -> bytes | None:
+    """The deployment attribution key, or None when unset (links go bare)."""
+    raw = os.environ.get(ATTRIBUTION_KEY_ENV, "")
+    return raw.encode() or None
+
+
+def tokenize_links(body: str, touch_id: str, key: bytes) -> str:
+    """Append the signed touch token to every URL in the body (FR-8.3) so a
+    conversion on the operator's side attributes back to this exact touch.
+    Runs at queue time — BEFORE the content hash is computed — so the bound
+    content is exactly what dispatches (validate-then-bind, spec 7.3)."""
+    token = token_for(touch_id, key)
+
+    def _append(match: re.Match[str]) -> str:
+        url = match.group(0)
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}t={token}"
+
+    return _URL_RE.sub(_append, body)
 
 
 def token_for(touch_id: str, key: bytes) -> str:

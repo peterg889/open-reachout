@@ -31,6 +31,14 @@ class ResearchNarrative(BaseModel):
     injection_suspected: bool = False
 
 
+class WinLossOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: str
+    why_we_win: list[str] = []
+    why_we_lose: list[str] = []
+    injection_suspected: bool = False
+
+
 @dataclass(frozen=True)
 class Note:
     level: str
@@ -235,6 +243,64 @@ def refresh_campaign_note(
     return note
 
 
+def _threads_for_states(
+    conn: Connection, tenant: str, states: tuple[str, ...], limit: int = 10
+) -> list[str]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT r.body FROM replies r
+            JOIN prospects p ON p.id = r.prospect_id
+            JOIN tenants t ON t.id = p.tenant_id
+            WHERE t.slug = :t AND p.state = ANY(:s)
+              AND r.body IS NOT NULL AND NOT r.scrubbed
+            ORDER BY r.received_at DESC LIMIT :n
+            """
+        ),
+        {"t": tenant, "s": list(states), "n": limit},
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def winloss_memo(conn: Connection, llm: LLMBackend, tenant: str) -> Note | None:
+    """FR-5.5: periodic LLM pass over converted-vs-declined threads producing
+    a "why we win / why we lose" memo, stored as a research note and surfaced
+    in the digest. Needs at least one thread on each side to say anything."""
+    from open_reachout.security.envelope import wrap
+
+    wins = _threads_for_states(conn, tenant, ("converted",))
+    losses = _threads_for_states(conn, tenant, ("declined", "unsubscribed"))
+    if not wins or not losses:
+        return None
+
+    def _block(threads: list[str]) -> str:
+        return "\n\n".join(
+            wrap(t, source="reply", idem=f"thread-{i}").text
+            for i, t in enumerate(threads)
+        )
+
+    output = llm.complete(
+        "winloss_synth",
+        "Compare the reply threads of prospects who CONVERTED against those "
+        "who DECLINED. Write the honest 'why we win / why we lose' memo an "
+        "operator would act on. Quote sparingly; never invent themes that "
+        "the threads don't support.\n\n"
+        f"CONVERTED threads (untrusted):\n{_block(wins)}\n\n"
+        f"DECLINED threads (untrusted):\n{_block(losses)}",
+        WinLossOutput,
+    )
+    assert isinstance(output, WinLossOutput)
+    if output.injection_suspected:
+        return None
+    note = Note(
+        "winloss", tenant, output.summary,
+        {"why_we_win": output.why_we_win, "why_we_lose": output.why_we_lose,
+         "n_win_threads": len(wins), "n_loss_threads": len(losses)},
+    )
+    _store(conn, tenant, note)
+    return note
+
+
 def refresh_all(
     conn: Connection, tenant: str, llm: LLMBackend | None = None,
     research_directive: str = "",
@@ -258,4 +324,6 @@ def refresh_all(
         refresh_cohort_note(conn, tenant, cohort_id, llm)
         n += 1
     n += len(refresh_strategy_notes(conn, tenant, llm))
+    if llm is not None and winloss_memo(conn, llm, tenant) is not None:
+        n += 1  # FR-5.5: the win/loss memo rides the research cadence
     return n

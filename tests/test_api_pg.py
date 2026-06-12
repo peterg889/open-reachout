@@ -142,3 +142,65 @@ def test_parse_tokens_rejects_weak_secrets() -> None:
         parse_tokens("ops:short:read")
     tokens = parse_tokens("ops:" + "s" * 24 + ":read|control:write")
     assert tokens[0].scopes == {"read", "control:write"}
+
+
+def test_fr83_links_tokenized_at_queue_and_convert_end_to_end(
+    pg_engine: Engine, conn, seed: Seed, monkeypatch  # noqa: ANN001
+) -> None:
+    """The full CAC loop: queued body carries the signed token; posting that
+    exact token converts the prospect (FR-8.3)."""
+    import re
+
+    from open_reachout.core import sendpath
+    from open_reachout.core.compliance.validators import Draft, content_hash
+
+    monkeypatch.setenv("OR_ATTRIBUTION_KEY", KEY.decode())
+    body = ("Join here: https://stagematch.test/join and our calendar "
+            "https://stagematch.test/cal?x=1 \n- Maya Reyes, StageMatch\n"
+            "1 Main St, Austin TX\nreply STOP to opt out")
+    draft = Draft(subject="s", body=body)
+    touch_id = sendpath.queue_draft(
+        conn, prospect_id=seed.prospect_id, campaign_id="c", variant_id="v",
+        step_index=0, kind="cold", draft=draft, content_hash=content_hash(draft),
+    )
+    stored_body, stored_hash = conn.execute(
+        text("SELECT body, content_hash FROM touches WHERE id = CAST(:i AS uuid)"),
+        {"i": touch_id},
+    ).fetchone()
+    tokens = re.findall(r"[?&]t=([0-9a-f]{32}\.[0-9a-f]{12})", stored_body)
+    assert len(tokens) == 2 and len(set(tokens)) == 1   # both URLs, same touch
+    assert "cal?x=1&t=" in stored_body                  # ?-aware separator
+    # validate-then-bind: the stored hash covers the tokenized body
+    assert stored_hash == content_hash(
+        Draft(subject="s", body=stored_body)
+    )
+    conn.execute(
+        text("UPDATE prospects SET state = 'contacted' WHERE id = CAST(:p AS uuid)"),
+        {"p": seed.prospect_id},
+    )
+    conn.commit()
+    api = client(pg_engine)
+    resp = api.post("/v1/conversions", json={"token": tokens[0]}, headers=auth())
+    assert resp.status_code == 200 and resp.json()["converted"] is True
+    with pg_engine.begin() as c:
+        state = c.execute(
+            text("SELECT state FROM prospects WHERE id = CAST(:p AS uuid)"),
+            {"p": seed.prospect_id},
+        ).scalar()
+        assert state == "converted"
+
+
+def test_no_key_means_bare_links(pg_engine: Engine, conn, seed: Seed, monkeypatch) -> None:  # noqa: ANN001
+    from open_reachout.core import sendpath
+    from open_reachout.core.compliance.validators import Draft, content_hash
+
+    monkeypatch.delenv("OR_ATTRIBUTION_KEY", raising=False)
+    draft = Draft(subject="s", body="see https://stagematch.test/join now")
+    touch_id = sendpath.queue_draft(
+        conn, prospect_id=seed.prospect_id, campaign_id="c", variant_id="v",
+        step_index=0, kind="cold", draft=draft, content_hash=content_hash(draft),
+    )
+    body = conn.execute(
+        text("SELECT body FROM touches WHERE id = CAST(:i AS uuid)"), {"i": touch_id}
+    ).scalar()
+    assert "t=" not in body

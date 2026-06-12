@@ -24,7 +24,7 @@ from open_reachout.core.queue import Job
 #: before new discovery floods the queues.
 QUEUE_PRIORITY = (
     "control", "trigger", "classify", "deliver", "compose", "referral", "reengage",
-    "qualify", "enrich", "discover",
+    "qualify", "enrich", "discover", "synthesize",
 )
 
 Handler = Callable[[Connection, Job], None]

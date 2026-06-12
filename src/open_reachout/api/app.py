@@ -20,9 +20,9 @@ from sqlalchemy.engine import Engine
 
 from open_reachout.core import attribution, control, events, forget
 from open_reachout.core import queue as job_queue
+from open_reachout.core.attribution import ATTRIBUTION_KEY_ENV
 from open_reachout.core.interfaces import SendingProvider, WebhookVerificationError
 
-ATTRIBUTION_KEY_ENV = "OR_ATTRIBUTION_KEY"
 TOKENS_ENV = "OR_API_TOKENS"
 
 
@@ -60,6 +60,11 @@ class OperatorEventIn(BaseModel):
     selector: dict = Field(default_factory=dict)
     payload: dict = Field(default_factory=dict)
     dedupe_key: str | None = None
+
+
+class ProgramIn(BaseModel):
+    tenant: str = Field(pattern=r"^[a-z0-9_-]+$")
+    brief: dict[str, object]
 
 
 def create_app(
@@ -156,6 +161,26 @@ def create_app(
                     idempotency_key=f"trigger:{row[0]}",
                 )
         return {"recorded": row is not None, "id": str(row[0]) if row else None}
+
+    @app.post("/v1/programs", status_code=202)
+    def programs(
+        body: ProgramIn, token: ApiToken = require("manage:write")
+    ) -> dict[str, object]:
+        """FR-9.1: Brief in -> synthesis job -> Program Proposal. The Brief is
+        schema-validated HERE (fail fast); the worker runs the LLM synthesis
+        and files the proposal for human approval."""
+        from pydantic import ValidationError
+
+        from open_reachout.core.config import Brief
+        from open_reachout.core.programs import enqueue_synthesis
+
+        try:
+            brief = Brief.model_validate(body.brief)
+        except ValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with engine.begin() as conn:
+            digest = enqueue_synthesis(conn, body.tenant, brief)
+        return {"queued": True, "brief_hash": digest}
 
     @app.get("/v1/funnel")
     def funnel(token: ApiToken = require("read")) -> dict:

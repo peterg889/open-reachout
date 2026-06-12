@@ -8,6 +8,7 @@ classify job for replies.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -16,10 +17,13 @@ from open_reachout.core import escalations, queue, suppression
 from open_reachout.core.interfaces import EventKind, LLMBackend, ProviderEvent, SendingProvider
 from open_reachout.core.lifecycle import transition
 from open_reachout.core.queue import Job
-from open_reachout.core.replies import Action, route
+from open_reachout.core.replies import Action, RouteDecision, route
 from open_reachout.core.states import ProspectState, TransitionError
 from open_reachout.core.worker import Handler, PermanentJobError
 from open_reachout.stats.persistence import record_guardrail, record_success
+
+if TYPE_CHECKING:
+    from open_reachout.core.prospecting import TenantRuntime
 
 PROVIDER_NAME = "provider"  # single-provider deployments; adapter name otherwise
 
@@ -154,10 +158,14 @@ def _act(conn: Connection, event: ProviderEvent) -> None:
         )
 
 
-def make_classify_handler(llm: LLMBackend) -> Handler:
+def make_classify_handler(
+    llm: LLMBackend, runtimes: dict[str, TenantRuntime] | None = None
+) -> Handler:
     """classify-queue handler: route the reply, apply deterministic outcomes,
-    record everything. Outbound agentic responses are queued as drafted
-    touches by M3's reply composer; here we record + suppress + escalate."""
+    record everything. With `runtimes` (tenant -> TenantRuntime), outbound
+    agentic responses (FR-4.2: FAQ answers, signup links, objection counters)
+    are composed and queued through the REPLY gate profile — one exchange,
+    enforced by the replies.agentic_exchanges counter, then escalation."""
 
     def classify(conn: Connection, job: Job) -> None:
         reply_id = str(job.payload["reply_id"])
@@ -236,6 +244,13 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
                 payload={"intent": decision.intent, "confidence": decision.confidence},
             )
 
+        if (
+            runtimes is not None
+            and decision.action in (Action.ANSWER_FAQ, Action.SEND_SIGNUP_LINK)
+        ):
+            _queue_agentic_reply(conn, runtimes, llm, decision, reply_id,
+                                 str(prospect_id), _tenant)
+
         if decision.intent == "objection":
             # FR-4.3: the objections are the market research — taxonomize and
             # keep the thread link; the digest reports frequency per cohort.
@@ -257,6 +272,72 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
         maybe_evaluate(conn, _tenant, str(cohort_id))
 
     return classify
+
+
+def _queue_agentic_reply(
+    conn: Connection, runtimes: dict[str, TenantRuntime], llm: LLMBackend,
+    decision: RouteDecision, reply_id: str, prospect_id: str, tenant: str,
+) -> None:
+    """FR-4.2: compose the one permitted agentic exchange and queue it through
+    the REPLY gate profile. Failure escalates; it never blocks the
+    deterministic outcomes already applied above."""
+    from open_reachout.agents.reply_composer import ReplyComposeError, compose_reply
+    from open_reachout.core import dryrun
+    from open_reachout.core.sendpath import queue_draft
+
+    runtime = runtimes.get(tenant)
+    if runtime is None:
+        return
+    # Claim the exchange atomically: 0 -> 1, or someone else already answered.
+    row = conn.execute(
+        text(
+            """
+            UPDATE replies SET agentic_exchanges = agentic_exchanges + 1
+            WHERE id = CAST(:i AS uuid) AND agentic_exchanges = 0
+            RETURNING body
+            """
+        ),
+        {"i": reply_id},
+    ).fetchone()
+    if row is None:
+        return
+    persona_id = conn.execute(
+        text("SELECT persona_id FROM prospects WHERE id = CAST(:p AS uuid)"),
+        {"p": prospect_id},
+    ).scalar()
+    persona = next(
+        (p for p in runtime.config.personas if p.id == persona_id), None
+    )
+    counter = None
+    if persona is not None and decision.objection_class:
+        counter = persona.objection_counters.get(decision.objection_class)
+    signup = (
+        runtime.config.brief.about_us.links.get("signup")
+        if decision.action is Action.SEND_SIGNUP_LINK else None
+    )
+    trusted = (
+        dryrun.trusted_context(runtime.config, persona)
+        if persona is not None
+        else dryrun.trusted_context(runtime.config, runtime.config.personas[0])
+    )
+    try:
+        draft, digest = compose_reply(
+            llm, reply_body=str(row[0]), faq=runtime.config.brief.about_us.faq,
+            trusted_context=trusted, validator_ctx=runtime.validator_ctx,
+            counter_snippet=counter, signup_link=signup,
+        )
+    except ReplyComposeError as exc:
+        escalations.escalate(
+            conn, tenant=tenant, subject_type="reply", subject_id=reply_id,
+            reason=f"agentic reply failed: {exc}",
+        )
+        return
+    queue_draft(
+        conn, prospect_id=prospect_id,
+        campaign_id=f"{persona_id or 'unknown'}:agentic_reply",
+        variant_id=None, step_index=0, kind="agentic_reply",
+        draft=draft, content_hash=digest,
+    )
 
 
 def make_control_handler(provider: SendingProvider) -> Handler:

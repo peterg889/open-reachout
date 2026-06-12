@@ -60,6 +60,23 @@ def build_report(conn: Connection) -> str:
         [f"- {t} / {co}: {cl} x{n}" for t, cl, co, n in objections],
     )
 
+    winloss = conn.execute(
+        text(
+            """
+            SELECT DISTINCT ON (tenant) tenant, summary, findings FROM research_notes
+            WHERE level = 'winloss' ORDER BY tenant, created_at DESC
+            """
+        )
+    ).fetchall()
+    out += _section(
+        "Why we win / why we lose (FR-5.5)",
+        [
+            f"- {t}: {s}\n  win: {'; '.join(f.get('why_we_win', []))}\n"
+            f"  lose: {'; '.join(f.get('why_we_lose', []))}"
+            for t, s, f in winloss
+        ],
+    )
+
     variants = conn.execute(
         text(
             """

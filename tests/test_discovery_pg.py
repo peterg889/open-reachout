@@ -386,3 +386,66 @@ def test_auto_review_applies_envelope_kinds_only(conn: Connection, seed: Seed) -
         {"i": applied[0]},
     ).scalar()
     assert actor == "system:autonomy"
+
+
+# ------------------------------------------------- win/loss synthesis (FR-5.5)
+def _thread(conn: Connection, seed: Seed, state: str, body: str) -> None:
+    eid, pid = str(uuid.uuid4()), str(uuid.uuid4())
+    conn.execute(
+        text("INSERT INTO entities (id, tenant_id) VALUES (CAST(:e AS uuid), "
+             "CAST(:t AS uuid))"),
+        {"e": eid, "t": seed.tenant_id},
+    )
+    conn.execute(
+        text("""INSERT INTO prospects (id, tenant_id, entity_id, cohort_id, persona_id,
+                state, source_adapter, data_basis)
+                VALUES (CAST(:p AS uuid), CAST(:t AS uuid), CAST(:e AS uuid), 'c', 'x',
+                :s, 'fake', 'government_public')"""),
+        {"p": pid, "t": seed.tenant_id, "e": eid, "s": state},
+    )
+    conn.execute(
+        text("INSERT INTO replies (prospect_id, body) VALUES (CAST(:p AS uuid), :b)"),
+        {"p": pid, "b": body},
+    )
+
+
+class _WinLossLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_prompt = ""
+
+    def complete(self, task: str, prompt: str, schema: type[BaseModel]) -> BaseModel:
+        assert task == "winloss_synth"
+        self.calls += 1
+        self.last_prompt = prompt
+        return schema.model_validate({
+            "summary": "We win on free venue accounts; we lose on band pricing.",
+            "why_we_win": ["zero cost for venues"],
+            "why_we_lose": ["bands balk at $9/mo"],
+        })
+
+
+def test_winloss_memo_needs_both_sides(conn: Connection, seed: Seed) -> None:
+    from open_reachout.core import research
+
+    llm = _WinLossLLM()
+    _thread(conn, seed, "converted", "Signed up, the free account sold me.")
+    assert research.winloss_memo(conn, llm, seed.tenant) is None  # no losses yet
+    assert llm.calls == 0
+
+
+def test_winloss_memo_synthesizes_and_reaches_digest(
+    conn: Connection, seed: Seed
+) -> None:
+    from open_reachout.core import research
+    from open_reachout.core.report import build_report
+
+    _thread(conn, seed, "converted", "Signed up, the free account sold me.")
+    _thread(conn, seed, "declined", "Nine bucks a month is too rich for us.")
+    llm = _WinLossLLM()
+    note = research.winloss_memo(conn, llm, seed.tenant)
+    assert note is not None and note.level == "winloss"
+    assert "<untrusted" in llm.last_prompt           # threads are enveloped
+    digest = build_report(conn)
+    assert "zero cost for venues" in digest
+    assert "bands balk at $9/mo" in digest

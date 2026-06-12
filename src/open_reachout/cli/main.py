@@ -277,7 +277,15 @@ def run(
     the prospecting queues idle and the worker still serves deliver/classify/
     control."""
     from open_reachout.adapters.fakes import FakeSendingProvider
-    from open_reachout.core import dryrun, events, noshow, prospecting, referrals, sendpath
+    from open_reachout.core import (
+        dryrun,
+        events,
+        noshow,
+        programs,
+        prospecting,
+        referrals,
+        sendpath,
+    )
     from open_reachout.core.db import engine_from_env
     from open_reachout.core.worker import Worker
 
@@ -322,7 +330,7 @@ def run(
         runtimes = {c.tenant: prospecting.runtime_for(conn, c) for c in configs}
     handlers = {
         "control": events.make_control_handler(sending),  # type: ignore[arg-type]
-        "classify": events.make_classify_handler(backend),  # type: ignore[arg-type]
+        "classify": events.make_classify_handler(backend, runtimes),  # type: ignore[arg-type]
         "deliver": sendpath.make_deliver_handler(
             sending,  # type: ignore[arg-type]
             contexts,
@@ -334,6 +342,7 @@ def run(
         "trigger": prospecting.make_trigger_handler(runtimes),
         "referral": referrals.make_referral_handler(runtimes, backend),
         "reengage": noshow.make_reengage_handler(runtimes, backend),  # type: ignore[arg-type]
+        "synthesize": programs.make_synthesize_handler(backend),
     }
     # discover/enrich need live source + enricher adapters (account-bound).
     # When configured, register them here; until then those queues simply
