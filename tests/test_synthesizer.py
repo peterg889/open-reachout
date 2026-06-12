@@ -115,3 +115,12 @@ def test_gemini_schema_adapter_inlines_refs_and_drops_additional_props() -> None
     assert "$ref" not in flat and "$defs" not in flat
     # nested Claim model survived inlining
     assert schema["properties"]["claims"]["items"]["properties"]["fact_id"]
+
+
+def test_gemini_schema_softens_exclusive_bounds() -> None:
+    from open_reachout.adapters.llm.gemini_backend import _gemini_schema
+    from open_reachout.agents.synthesizer import SynthesizedProgram
+
+    schema = repr(_gemini_schema(SynthesizedProgram))
+    assert "exclusiveMinimum" not in schema and "exclusiveMaximum" not in schema
+    assert "'minimum'" in schema  # gt=0 fields keep a usable bound

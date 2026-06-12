@@ -28,7 +28,10 @@ _MAX_TOKENS_DEFAULT = 8192
 #: Research-class tasks run a grounded Google-Search pass first (real web
 #: research with cited sources), then a structuring pass — the API cannot
 #: combine the search tool with response_schema in one call.
-_GROUNDED_TASKS = {"discovery_research", "brainstorm_goals", "sender_research", "winloss_synth"}
+_GROUNDED_TASKS = {
+    "discovery_research", "brainstorm_goals", "sender_research", "winloss_synth",
+    "web_enrich",
+}
 
 
 class GeminiBackend:
@@ -165,10 +168,20 @@ def _gemini_schema(schema: type[BaseModel]) -> dict[str, object]:
             if "$ref" in node:
                 name = str(node["$ref"]).rsplit("/", 1)[-1]
                 return clean(defs.get(name, {}))
-            return {
-                k: clean(v) for k, v in node.items()
-                if k not in ("additionalProperties", "title", "default")
-            }
+            out: dict[str, object] = {}
+            for k, v in node.items():
+                if k in ("additionalProperties", "title", "default"):
+                    continue
+                # Gemini's Schema rejects exclusive bounds: soften to inclusive
+                # (generation guidance only; pydantic re-validates strictly).
+                if k == "exclusiveMinimum":
+                    out.setdefault("minimum", v)
+                    continue
+                if k == "exclusiveMaximum":
+                    out.setdefault("maximum", v)
+                    continue
+                out[k] = clean(v)
+            return out
         if isinstance(node, list):
             return [clean(item) for item in node]
         return node
