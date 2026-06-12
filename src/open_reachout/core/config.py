@@ -182,6 +182,29 @@ class ConfigError(Exception):
     pass
 
 
+def load_brief(path: Path) -> Brief:
+    """Load a Brief from a bare brief.yaml, or extract one from a tenant.yaml
+    (anything with a top-level `brief:` key)."""
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: expected a mapping at top level")
+    payload = raw.get("brief", raw)
+    try:
+        return Brief.model_validate(payload)
+    except Exception as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def dump_tenant(cfg: TenantConfig) -> str:
+    """Serialize a tenant config to YAML (synthesis output, FR-0.4)."""
+    return yaml.safe_dump(
+        cfg.model_dump(mode="json", exclude_none=True), sort_keys=False, width=88
+    )
+
+
 def load_tenant(path: Path) -> TenantConfig:
     """Load and validate one tenant config file. Raises ConfigError with all
     pydantic detail attached — fail closed, fail loudly, fail early."""

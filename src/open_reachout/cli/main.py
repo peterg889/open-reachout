@@ -73,9 +73,101 @@ def _not_yet(milestone: str) -> None:
 
 
 @app.command()
-def init() -> None:
-    """Brief interview -> program synthesis (FR-0.2)."""
-    _not_yet("M4")
+def init(
+    from_brief: Path = typer.Option(  # noqa: B008 — typer idiom
+        ..., "--from-brief", help="brief.yaml (or any yaml with a top-level brief: key)"
+    ),
+    tenant: str = typer.Option(..., help="tenant slug for the generated program"),
+    out: Path = typer.Option(Path("."), help="output directory"),  # noqa: B008
+    llm: str = typer.Option(
+        "fake", help="fake = deterministic scaffold | gemini | anthropic = real synthesis"
+    ),
+    sample: int = typer.Option(5, help="dry-run sample emails in the proposal"),
+) -> None:
+    """Brief -> program synthesis -> Program Proposal (FR-0.2).
+
+    Writes tenant.yaml (with generated_by provenance) and program-proposal.md
+    (cohort summary + sample emails). Review the proposal, edit the config,
+    then `reachout validate` before anything runs.
+    """
+    from open_reachout.adapters.fakes import FakeEnricher, FakeFinder, FakeSource, FakeVerifier
+    from open_reachout.agents import synthesizer
+    from open_reachout.core import dryrun
+    from open_reachout.core.config import dump_tenant, load_brief
+    from open_reachout.core.interfaces import Candidate, DataBasis
+
+    brief = load_brief(from_brief)
+    if llm == "fake":
+        cfg = synthesizer.template_program(brief, tenant)
+        mode = "deterministic scaffold (edit before launch; --llm gemini for real synthesis)"
+    else:
+        if llm == "gemini":
+            from open_reachout.adapters.llm.gemini_backend import GeminiBackend
+
+            backend: object = GeminiBackend()
+        else:
+            from open_reachout.adapters.llm.anthropic_backend import AnthropicBackend
+
+            backend = AnthropicBackend()
+        try:
+            cfg = synthesizer.synthesize(backend, brief, tenant)  # type: ignore[arg-type]
+        except synthesizer.SynthesisEscalation as exc:
+            typer.secho(f"synthesis escalated: {exc}", fg="red")
+            raise typer.Exit(1) from exc
+        mode = f"synthesized via {llm}"
+
+    out.mkdir(parents=True, exist_ok=True)
+    tenant_path = out / "tenant.yaml"
+    tenant_path.write_text(dump_tenant(cfg))
+
+    # Program Proposal: cohort summary + dry-run sample (operators judge
+    # programs by reading emails, not YAML — PRD FR-0.2).
+    ctx = dryrun.validator_context(cfg)
+    scripted = dryrun.ScriptedLLM(ctx, cfg.brief.about_us.identity.sender)
+    sources = {
+        s: FakeSource(
+            [
+                Candidate(
+                    display_name=f"Sample Prospect{i}", org_name=f"Sample Org {i}",
+                    website="https://example.test",
+                    email_raw=f"prospect{i}@sample.example.test",
+                    source_adapter=s, data_basis=DataBasis.GOVERNMENT_PUBLIC,
+                )
+                for i in range(sample)
+            ]
+        )
+        for p in cfg.personas for c in p.cohorts for s in c.sources
+    }
+    proposal_path = out / "program-proposal.md"
+    report = dryrun.run(
+        cfg, sources, FakeEnricher(), FakeFinder(), FakeVerifier(),
+        scripted, sample, proposal_path,
+    )
+    summary = [
+        "# Program Proposal", "",
+        f"- mode: {mode}",
+        f"- tenant: {cfg.tenant} (autonomy: {cfg.brief.autonomy})",
+        f"- provenance: {cfg.generated_by.agent if cfg.generated_by else 'hand-written'} "
+        f"hash={cfg.generated_by.config_hash if cfg.generated_by else '-'}",
+        "",
+        "## Cohorts",
+    ]
+    for p in cfg.personas:
+        for c in p.cohorts:
+            summary.append(
+                f"- {p.id}/{c.id}: {c.monthly_budget}/mo via {', '.join(c.sources)} "
+                f"({len(p.variants)} variants)"
+            )
+    summary += ["", "## Sample emails (scripted placeholders; live LLM at dry-run)", ""]
+    proposal_path.write_text("\n".join(summary) + "\n" + proposal_path.read_text())
+
+    typer.secho(f"wrote {tenant_path} and {proposal_path} ({mode})", fg="green")
+    typer.echo(
+        f"next: review {proposal_path.name}, edit {tenant_path.name}, then "
+        f"`reachout validate {tenant_path}` and `reachout dry-run {tenant_path} --llm gemini`"
+    )
+    if report.escalated:
+        typer.secho(f"note: {len(report.escalated)} sample(s) escalated", fg="yellow")
 
 
 @app.command("dry-run")

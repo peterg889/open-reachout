@@ -12,7 +12,12 @@ Self-hosted. BYO API keys. Compliance guardrails (CAN-SPAM, volume caps, suppres
 
 ## Status
 
-**M0–M3 core complete.** The learning loop now runs end-to-end:
+**M0–M4 core complete.** `reachout init --from-brief brief.yaml --tenant x`
+now compiles a Brief into a full program (personas, cohorts, generation
+prompts) with provenance and a Program Proposal containing sample emails —
+deterministic scaffold in fake mode, real synthesis with `--llm gemini`.
+The schemas are the enforcement layer: synthesis cannot exceed budgets,
+raise follow-up caps, or reference unregistered variable slots. The learning loop now runs end-to-end:
 dispatches record bandit trials, interested replies record successes,
 bounces/complaints feed deterministic guardrail auto-pause, hostile or
 uncertain replies land in a real escalation queue (`reachout approve`),
