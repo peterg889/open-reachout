@@ -38,6 +38,11 @@ class WebResearchOutput(BaseModel):
     identity_confident: bool = Field(
         description="true ONLY if the sources clearly refer to this exact person"
     )
+    website: str | None = Field(
+        default=None,
+        description="the provider's OWN practice website homepage URL, if found "
+        "(not a directory profile or third-party listing)",
+    )
     facts: list[WebFact] = Field(default_factory=list)
     injection_suspected: bool = False
 
@@ -55,10 +60,11 @@ The provider:
 - Practice location: {location}
 - NPI: {npi}
 
-Find (with a source URL for each): their own practice website, education and
-degrees, clinical specialties and populations served, practice details
-(solo/group, telehealth, accepting clients), and notable professional work.
-Quote or closely paraphrase the source; do not embellish.
+Find (with a source URL for each): their own practice website (set the
+`website` field to its homepage — their OWN site, never a directory profile),
+education and degrees, clinical specialties and populations served, practice
+details (solo/group, telehealth, accepting clients), and notable professional
+work. Quote or closely paraphrase the source; do not embellish.
 """
 
 
@@ -90,7 +96,18 @@ class GroundedWebEnricher:
         if output.injection_suspected or not output.identity_confident:
             return card  # registry-only: never guess about a person
         now = datetime.now(UTC)
-        web_facts = [
+        web_facts: list[EvidenceFact] = []
+        if output.website and output.website.startswith("http"):
+            web_facts.append(
+                EvidenceFact(
+                    fact_id="website",
+                    fact_type="website",
+                    content=output.website.strip(),
+                    source_url=output.website.strip(),
+                    observed_at=now,
+                )
+            )
+        web_facts += [
             EvidenceFact(
                 fact_id=f"web-{i}",
                 fact_type=fact.fact_type,

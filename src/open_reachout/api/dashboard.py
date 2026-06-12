@@ -496,6 +496,16 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             ledger = _ledger_rows(conn, prospect_id) if detail else ""
         if detail is None:
             raise HTTPException(404, "no such prospect")
+        website = next(
+            (e[1] for e in detail.evidence
+             if e[0] == "website" and str(e[1]).startswith("http")),
+            None,
+        )
+        website_html = (
+            f"<p><a href='{_e(website)}' rel='noopener noreferrer'>"
+            f"↗ {_e(website)}</a> <span class='small'>their own website, found "
+            f"during research</span></p>" if website else ""
+        )
         evidence_html = "".join(
             f"<tr><td><span class='tag'>{_e(e[0])}</span></td>"
             f"<td><pre>{_e(e[1])}</pre></td>"
@@ -525,6 +535,7 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             _cards([("state", detail.state), ("cohort", detail.cohort_id),
                       ("persona", detail.persona_id),
                       ("source", f"{detail.source_adapter} ({detail.data_basis})")])
+            + website_html
             + "<h2>Background research (Evidence Card)</h2>"
             + "<table><tr><th>type</th><th>fact</th><th>provenance</th></tr>"
             + evidence_html + "</table>"

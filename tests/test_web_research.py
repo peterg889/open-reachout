@@ -25,6 +25,7 @@ class _ConfidentLLM:
         assert "Muhammad Abbass" in prompt and "NEWARK, NJ" in prompt
         return schema.model_validate({
             "identity_confident": True,
+            "website": "https://drabbass.example",
             "facts": [
                 {"fact_type": "education",
                  "content": "PsyD in Clinical Psychology from Rutgers GSAPP",
@@ -55,6 +56,8 @@ def test_layers_web_facts_over_registry_floor() -> None:
     assert edu.source_url.startswith("https://drabbass.example")
     # the no-provenance fact was dropped: every fact carries a real source
     assert all(f.source_url.startswith("http") for f in card.facts)
+    site = next(f for f in card.facts if f.fact_type == "website")
+    assert site.content == "https://drabbass.example"  # their own site, linked
 
 
 def test_uncertain_identity_keeps_registry_only() -> None:
