@@ -1,6 +1,6 @@
 # Open Reachout — System Architecture & Engineering Specification
 
-**Status:** Draft v1 · June 2026
+**Status:** Draft v2 · June 2026 — v2 adds the component inventory (§3.1) and technical designs for the PRD Round 3–4 components: research subsystem incl. sender profiles (§8.10), rebalancing (§8.11), value artifacts (§8.12), message-review ramp (§8.4), sector-sensitivity screen (§13.6), and the dashboard as a management surface (§11.4); corrects the §3 diagram (Gemini default, own-domain SMTP). **v3** completes requirement coverage: human-task sequence steps (§8.13), reply-flow extensions — objection library, referral flow, no-show handling (§8.14), compliance-regime plugins (§13.7), signal-source handling (§8.1), digest/doctor/audit-export designs (§14, §17, §11.2), and a full requirements-traceability matrix in [`requirements-traceability.md`](requirements-traceability.md) mapping every PRD requirement → component → design section → verification.
 **Audience:** implementers (and contributors writing adapters).
 **Relationship to other docs:** [`PRD.md`](../PRD.md) defines *what* and *why* (FR-x.y requirement IDs, §10 acceptance gates, P0/P1/P2 priorities); this spec defines *how*. Where this spec and the PRD conflict, the PRD's invariants win and this spec has a bug.
 
@@ -8,7 +8,7 @@
 
 ## 1. Scope & Design Stance
 
-This spec covers the 0.1 system (PRD milestones M0–M4) plus the load-bearing design hooks for committed P1 features (event API, human tasks, claim allowlist) so they arrive without breaking changes.
+This spec covers the 0.1 system (PRD milestones M0–M4) plus the load-bearing design hooks for committed P1 features (event API, human tasks, claim allowlist, tiered research notes, sender profiles, rebalancing, value-artifact collateral, the management-surface dashboard) so they arrive without breaking changes.
 
 Design stance, in order:
 
@@ -48,7 +48,7 @@ These are the engineering commitments the rest of the document exists to honor. 
    compact tables) ───► │   /v1/events /v1/conversions /v1/forget      │
                         │   /v1/halt /v1/resume /v1/queues …           │
    provider webhooks ─► │   /hooks/{provider}   (HMAC-verified)        │
-   operator browser ──► │   /dashboard (read-only + review queue)      │
+   operator browser ──► │   /dashboard (funnel + drill-down + queues + mgmt §11.4)      │
                         └────────────────┬─────────────────────────────┘
                                          │ writes jobs + events
                                          ▼
@@ -71,10 +71,44 @@ These are the engineering commitments the rest of the document exists to honor. 
                                          │ outbound only, BYO keys
                                          ▼
         Firecrawl/Tavily · Apify · NPPES file · Google Places · email finders ·
-        verifiers · LLM provider (Anthropic default) · sending provider (Smartlead)
+        verifiers · LLM provider (Gemini default; Anthropic alternative) ·
+        sending: own-domain SMTP (direct) or managed provider (Smartlead)
 ```
 
 Three containers (`api`, `worker`, `postgres`); `api` is stateless and `worker` is crash-safe (every job idempotent + leased), so both can run replicated, though 0.1 ships single-instance.
+
+### 3.1 Component inventory
+
+Every component that gets built, where it lives, what it talks to, and where its design is. Components communicate **only** through two channels: Postgres (jobs, state, events) and the in-process service layer — there is no component-to-component RPC. Anything side-effectful beyond Postgres lives in `adapters/` behind a Protocol.
+
+| Component | Module | Responsibility | Talks to | Design | PRD |
+|---|---|---|---|---|---|
+| Config & Brief loader | `core/config` | YAML → pydantic → content-hashed `config_versions`, atomic apply | read by everything | D-10 | FR-1.1, FR-0.1 |
+| Program synthesizer | `agents/synthesizer` | Brief → program artifacts + Program Proposal; revision mode on drift | LLM, source probes, proposals | §8.8 | FR-0.2–0.6 |
+| Job queue & scheduler | `core/queue`, worker | leases, retries, DLQ, cron; scheduler enqueues only | Postgres only | §6 | FR-I.1 |
+| Source adapters | `adapters/sources` | directory + signal discovery with provenance | called by discover stage | §8.1 | FR-2.1/2.2 |
+| Ingest screen + entity resolution | `core/entity`, `core/prospecting` | tombstone/suppression/denylist screening; entity merge | discover stage | §8.1, §12 | FR-2.3/2.4/2.10 |
+| Enricher | `adapters/enrich` + LLM task | web presence → Evidence Card (per-fact provenance + staleness) | Firecrawl, `EXTRACT_FACTS` | §8.2 | FR-2.5 |
+| Email finder/verifier waterfall | `adapters/enrich`, `adapters/verify` | address + calibrated confidence buckets | enrich stage | §8.2 | FR-2.6 |
+| Qualifier | `agents/qualifier` | verdict + rationale; uncertain ⇒ disqualified | LLM (envelope) | §8.3 | FR-2.7 |
+| Research subsystem | `core/research` | tiered research notes (campaign/cohort/strategy) + sender profile | LLM, sources; feeds synthesis/variant-gen/UI | **§8.10** | FR-2.11, FR-0.7 |
+| Composer | `agents/composer` | variant prompt + variables → draft + `claims[]` | LLM, variable registry, validators | §8.4, §9.6 | FR-3.1/3.1a |
+| Compliance validators | `core/compliance` | deterministic pack: CAN-SPAM, claims lint, identity honesty, PHI screen | compose + claim txn (twice) | §7.3, §13.6 | FR-3.2, FR-7.1, FR-3.11 |
+| Groundedness auditor | `agents` + LLM task | independent claim-vs-evidence check, hash-stamped | between compose and claim | §7.3 | I-4 |
+| **Gatekeeper** | `core/gatekeeper` | the claim transaction; sole `ClaimedTouch` factory | Postgres locks; only caller of `adapters/sending` | §7 | I-1/2/3/7/8/9 |
+| Sending adapters | `adapters/sending` | own-domain SMTP (`direct_send`) / provider-sequence mode | gatekeeper only | §7.6 | D-7, NG6 |
+| Inbound pipeline | `api` hooks + IMAP poll | signed webhooks / polled inbox → `provider_events` → typed handlers | Postgres; deterministic compliance paths | §8.5 | I-10, FR-4.x |
+| Reply agent | `agents/reply_handler` | classify intent; allowlisted typed actions; escalate | LLM (envelope), `ReplyAction` registry, gatekeeper (§7.5) | §8.5 | FR-4.1–4.6 |
+| Stats engine | `stats/` | Thompson sampling, pooled attributes, sentiment throttle, verifier calibration | compose (select), learn stage | §10 | FR-5.x, FR-2.6 |
+| Discovery agent | `agents/discovery` | outcome mining → cohort/budget/goal proposals | LLM, web research (budgeted) | §8.7 | FR-6.1/6.2, FR-0.5 |
+| Rebalancer | `core` + `stats` | underperformance detection → rebalance proposals / auto-apply | synthesis estimates, counters, control flags | **§8.11** | FR-6.5 |
+| Artifact service | `core` + `api` | per-cohort collateral registry; per-prospect generated artifacts; hosted attributed links | validators, groundedness, attribution | **§8.12** | FR-3.10 |
+| Attribution | `core/attribution` | signed touch tokens; conversion ingestion with typed goals | api, stats | §8.9 | FR-8.3, FR-0.1 |
+| Suppression / forget / halt / kill-switch | `core` compliance | the non-bypassable control set | every send path; control queue | §13, §7.1 | I-2/3/6, FR-7.x |
+| Service layer + REST API | `core` service, `api/` | the one implementation; CLI/REST/dashboard are shells | everything above | §11 | FR-1.6 |
+| Dashboard UI | `api/dashboard` | funnel + abandonment, drill-down with research tiers, queues, campaign management | service layer only | **§11.4** | §7.9, §8.8 (RX) |
+| CLI | `cli/` | `reachout *` — shell over the service layer | service layer | §11.3 | FR-1.2–1.5 |
+| Observability | OTel + digest | traces, metrics, SLOs, weekly digest | all stages | §14 | FR-8.1/8.4 |
 
 ## 4. Technology Decisions
 
@@ -105,6 +139,8 @@ tenants ─┬─ personas ─┬─ cohorts ─┬─ campaigns ─┬─ seque
          ├─ suppressions          ├─ mailboxes / sending_domains
          ├─ proposals             ├─ human_tasks (P1 hook)
          ├─ spend_ledger          ├─ counters (volume/frequency periods)
+         ├─ research_notes (campaign|cohort|strategy tiers, §8.10)
+         ├─ sender_profiles (§8.10)   ├─ assets (collateral/artifacts, §8.12)
          └─ claim_registry (P1 hook)
 jobs · provider_events · audit_events · control_flags · config_versions ·
 operator_events (FR-2.9 hook) · raw_documents · attribute_effects
@@ -239,7 +275,7 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_poll ON jobs (queue, run_after) WHERE status = 'ready';
 ```
 
-Plus, schema'd but not reproduced here: `tenants/personas/cohorts/campaigns/sequences/experiments/variants/variant_stats/attribute_effects`, `replies`, `objections`, `proposals`, `human_tasks`, `mailboxes`, `sending_domains`, `provider_events`, `operator_events`, `spend_ledger`, `audit_events`, `raw_documents`, `claim_registry`, `entity_merges`, `config_versions`, `api_tokens`.
+Plus, schema'd but not reproduced here: `tenants/personas/cohorts/campaigns/sequences/experiments/variants/variant_stats/attribute_effects`, `replies`, `objections`, `proposals`, `human_tasks`, `mailboxes`, `sending_domains`, `provider_events`, `operator_events`, `spend_ledger`, `audit_events`, `raw_documents`, `claim_registry`, `entity_merges`, `config_versions`, `api_tokens`, `research_notes`, `sender_profiles`, `assets`.
 
 ### 5.3 Append-only enforcement
 
@@ -340,7 +376,7 @@ This reactive gap is specific to **provider-sequence mode**: between enrollment 
 Each stage: *trigger → handler → output → failure posture*. All handlers idempotent (§6).
 
 ### 8.1 Discover
-Scheduler (per-cohort cadence) or operator event (FR-2.9) enqueues `discover` with a source-adapter cursor. Handler calls `SourceAdapter.discover`, spend-meters, writes `raw candidates`, runs **ingest screening**: canonicalize email if present → tombstone check (sha match ⇒ drop silently), suppression check, denylist check on source URLs, entity resolution (§12) → new/updated `prospects` in `discovered`, dedup by `(cohort, entity)`. BYO import (FR-2.10) is the same path with `source_adapter='import'` and mandatory `data_basis` (CLI rejects files lacking it). Failure: adapter errors retry; per-source circuit breaker (5 consecutive failures ⇒ source paused + alert).
+Scheduler (per-cohort cadence) or operator event (FR-2.9) enqueues `discover` with a source-adapter cursor. Handler calls `SourceAdapter.discover`, spend-meters, writes `raw candidates`, runs **ingest screening**: canonicalize email if present → tombstone check (sha match ⇒ drop silently), suppression check, denylist check on source URLs, entity resolution (§12) → new/updated `prospects` in `discovered`, dedup by `(cohort, entity)`. BYO import (FR-2.10) is the same path with `source_adapter='import'` and mandatory `data_basis` (CLI rejects files lacking it). Failure: adapter errors retry; per-source circuit breaker (5 consecutive failures ⇒ source paused + alert). **Signal-kind sources (FR-2.2)** emit timing events instead of identities: the handler resolves each event to an entity via the same keys (§12), stores it as an entity signal, and either boosts the matching cohort's priority or enqueues the configured `trigger: signal` sequence — which then flows through the standard pipeline and every gate like any other touch.
 
 ### 8.2 Enrich
 `discovered → enrich` job: fetch prospect's own web presence (Firecrawl; denylist-checked; robots-respecting; raw snapshots → `raw_documents`), extract `evidence_facts` via LLM **inside the untrusted envelope** (§9.3) with per-fact `observed_at = fetch time` and `source_url`; then the email waterfall (own-site regex/mailto first, then Prospeo → FindyMail → Hunter, stop on first verified hit, each call spend-metered and recorded) and verification (calibrated bucket). Output: `enriched` or `unenrichable`.
@@ -358,6 +394,8 @@ For a `qualified` prospect with available campaign budget (cheap pre-check; auth
 
 Resolved variable values (with their trust class and source fact ids) are recorded in the touch's `decision_traces` row, so any sent message is reproducible: prompt version + variables + model = the generation.
 
+**Message-review ramp (PRD FR-0.3, P1):** campaigns carry `approve_first: N`. A drafted touch whose campaign (or whose newly adopted variant) has fewer than N approved sends routes to the review queue *before* the gatekeeper (status `pending_review`; approval enqueues `gatekeep`, rejection releases the touch and records a correction, FR-2.8). The ramp counter is `(campaign_id, variant_id)`-keyed and lives on the campaign row, decided in the same transaction that drafts the touch — two concurrent drafts cannot both count as "the Nth". Past N, the campaign drops to the FR-8.6 sampled-QA rate. The ramp is review-queue routing only: every approved message still goes through the full claim transaction (a reviewer cannot approve their way past suppression or budget).
+
 ### 8.5 Observe & Classify
 Provider webhooks → `/hooks/{provider}` → signature verify (I-10) → `provider_events` insert (unique `provider_event_id`; duplicates no-op) → typed events:
 - **bounce/complaint:** deterministic handlers — suppression insert, counter/kill-switch math, variant guardrail update. **No LLM in this path** (I-11): opt-outs and abuse signals must work when models are down or budgets exhausted.
@@ -374,7 +412,7 @@ Weekly scheduler job, hard-capped by `monthly_research_budget` (spend reservatio
 The Brief is config (`brief.yaml`, pydantic-validated, content-hashed into `config_versions` like everything else). Synthesis is a **compiler with an LLM front-end**, not a freeform agent:
 
 1. `reachout init` (interview or `--from-brief`) runs `SYNTHESIZE_PROGRAM`: Brief → candidate personas/cohorts/variant prompts/sequence shapes/experiment plans, emitted as **ordinary config artifacts** with `generated_by: synthesis@<hash>` provenance — the same pydantic schemas hand-written config uses. There is no second config system; synthesis output that fails `reachout validate` fails synthesis (retry-with-errors ×2, then partial program + flagged gaps).
-2. **Structural constraints the synthesizer cannot exceed** (enforced by the schemas + validators, not the prompt): product claims only from `about_us` (which seeds the claim registry); volumes/spend within `budgets`; follow-up caps, frequency caps, send windows inherited from core constants; variant prompts may only reference registered variables (FR-3.1a); source adapters chosen from the registered + non-denylisted set.
+2. **Structural constraints the synthesizer cannot exceed** (enforced by the schemas + validators, not the prompt): product claims only from `about_us` (which seeds the claim registry); volumes/spend within `budgets`; cohorts only within the Brief's `restrictions` (geography/exclusions are schema-enforced hard bounds, FR-0.1); follow-up caps, frequency caps, send windows inherited from core constants; variant prompts may only reference registered variables (FR-3.1a); source adapters chosen from the registered + non-denylisted set.
 3. **Live source probes:** synthesis runs cheap, spend-metered probe queries against chosen source adapters (e.g., NPPES taxonomy counts, a Places page) so cohort size estimates in the Program Proposal are measured, not hallucinated.
 4. Output = one **Program Proposal** row (a `proposals` record of kind `program`) bundling the artifact set + a 25-email dry-run sample (FakeProvider path). `reachout approve` applies the artifacts atomically as a config version and schedules launch (warmup-aware).
 5. **Edit-pinning (FR-0.4):** each generated artifact carries `generated_hash`; if the operator hand-edits a file (hash mismatch at load), it's marked `pinned` and excluded from future re-synthesis/revision proposals — no silent overwrites. `reachout program diff` shows generated-vs-pinned drift.
@@ -382,12 +420,42 @@ The Brief is config (`brief.yaml`, pydantic-validated, content-hashed into `conf
 7. **Autonomy presets (FR-0.3)** are config sugar expanded at load into the per-capability knobs; the expansion table is a code constant, and the always-human set (new personas, value-prop claim changes, spend-cap raises, halt resume, escalations) is hard-coded — a preset cannot grant them.
 
 ### 8.9 Conversions & attribution
-Outbound URLs embed `t=<base32(touch_id)>.<hmac_sha256(tenant_attr_key, touch_id)[:10]>`. `/v1/conversions` (and the Python API) verifies the MAC, marks the prospect `converted`, attributes through touch → variant → cohort, feeds `variant_stats.conversions`. Invalid MACs are logged and rejected (no unauthenticated state changes).
+Outbound URLs embed `t=<base32(touch_id)>.<hmac_sha256(tenant_attr_key, touch_id)[:10]>`. `/v1/conversions` (and the Python API) verifies the MAC, marks the prospect `converted`, attributes through touch → variant → cohort, feeds `variant_stats.conversions`. Invalid MACs are logged and rejected (no unauthenticated state changes). Campaigns carry a typed `goal_type` (PRD FR-0.1: signup, click, claim_profile, book_call, custom_webhook); the conversion handler stamps it on the attribution row so the bandit success metric (§10.1) optimizes the configured goal event, not a proxy.
+
+### 8.10 Research subsystem (PRD FR-2.11, FR-0.7 — P1)
+
+- **Storage:** `research_notes(id, tenant_id, tier, ref_id, body jsonb, sources jsonb, llm_narrative bool, refreshed_at, generated_by, supersedes uuid)` where `tier ∈ {campaign, cohort, strategy}` and `ref_id` points at the tier's object. Refresh appends a new row with `supersedes` set — consumers read the latest, traces can pin the version they used, history is free.
+- **Producers:** `reachout research` and the scheduler (discovery cadence). Each refresh has two parts: a **data-only aggregation** (SQL over outcomes, funnel, objections — free, always runs) and an optional **LLM narrative** (`RESEARCH_NOTE` task, research-budget metered). Campaign-tier notes are produced *before* cohort synthesis runs, so market research flows into cohort design (synthesis reads them as input, §8.8).
+- **Trust class:** research notes are web-derived/LLM-written ⇒ **untrusted**. When injected into synthesis or variant-generation prompts they travel in the envelope (§9.3) like any scraped content. The composer never reads research notes — Evidence Cards remain the only personalization substrate, which keeps the I-4 groundedness story exact (every claim ↔ one fact).
+- **Sender profile (FR-0.7):** `sender_profiles(tenant_id, version, facts jsonb [{fact, source_url, observed_at}], status proposed|approved, approved_by)`. The `SENDER_RESEARCH` task (init + cadence) researches the operator's own site/profiles/`about_us` links; output always lands `proposed`. One-time operator approval **elevates approved facts to trusted-class variables** (`{{sender.*}}` in the registry, §9.6) and seeds claim-registry entries of class `sender_fact` — this is the *only* path by which web-derived content becomes trusted, and it requires a human. Re-research emits a diff as a proposal; an approved profile is never silently mutated.
+- **Consumers:** synthesis (campaign tier), variant generation FR-5.4 (cohort + strategy tiers), composer (`{{sender.*}}` only, post-approval), dashboard drill-down (every tier, §11.4).
+
+### 8.11 Rebalancing (PRD FR-6.5 — P1)
+
+- **Detection:** synthesis stores per-cohort estimates with the program (probe-measured sizes, expected contactable%/reply%, §8.8.3). A nightly `rebalance_scan` job compares realized funnel rates per campaign/cohort against those estimates and configured floors using **posterior intervals, not point estimates** (the §10.1 Beta machinery): a cohort is flagged only when the 90% upper bound of its rate sits below the floor with a minimum trial count — small-sample noise cannot trigger a shift.
+- **Output:** `proposals` rows of kind `rebalance` (shift budget X→Y, pause cohort, retire cohort, or trigger FR-0.6 re-synthesis), each with the funnel evidence attached. Applying one executes audited `counters` cap rewrites and/or `control_flags(scope=campaign)` — the same primitives the sentiment throttle (§10.3) already uses; no new enforcement machinery.
+- **Autonomy:** under `hands_off`, rebalance proposals that stay within the existing budget envelope and persona set auto-approve via the same policy gate as `auto_launch_within_budget` (§8.7), and the digest reports applied shifts. Persona, value-prop, and total-spend changes are in the hard-coded always-human set (§8.8.7) — a rebalance can move money between cohorts, never raise the total.
+
+### 8.12 Value artifacts (PRD FR-3.10 — P1 collateral / P2 generated)
+
+- **Storage:** `assets(id, tenant_id, cohort_id, prospect_id nullable, kind collateral|generated, content_ref, content_hash, claims jsonb, lint_version, status, approved_by)`. Content bodies live in `raw_documents`/BlobStore (D-8).
+- **Collateral (P1):** operator-registered files/URLs mapped per cohort, claims-linted at registration (the FR-3.2 pack runs against extracted text; re-lint on claim-registry version change). Sequence steps reference `{{asset.<id>}}`, which resolves to an **attributed link** (the §8.9 token scheme; served by the api container at `/a/<token>` → tracked redirect or inline render) — never a MIME attachment by default, for deliverability.
+- **Generated (P2):** an `ARTIFACT_GENERATE` task composes a per-prospect artifact from Evidence Card facts + operator-supplied data, emitting `{content, claims[]}` exactly like the composer. The full message-quality regime applies: deterministic validators, groundedness audit against cited `fact_id`s (gate 1 covers artifacts — an artifact is content), staleness filtering at variable resolution, and artifact hash + version recorded in the touch's decision trace. A touch and its artifact are claimed together; an artifact that fails audit blocks the touch.
+
+### 8.13 Human-task sequence steps (PRD FR-3.6 — P1)
+
+A sequence step may be `type: human_task` ("DM them on Instagram", "walk in Thursday"). Mechanics: when the sequence reaches that step, the framework composes a **task brief** (entity context, Evidence Card, conversation history, suggested talking points — produced by the composer frame with the send path disabled; same grounding rules, gate 1 applies to the brief's factual claims) and inserts a `human_tasks` row + a touch of `kind='human_task'`, `status='pending_human'`. The sequence parks until the operator marks the task **done** (outcome notes recorded; touch → `sent`-equivalent terminal) or **skipped** (touch `released`). Two rules with teeth: a completed human touch **counts against the entity's frequency caps** exactly like an email (off-channel contact is still contact, I-7), and tasks expire after a configured age (default 14 d) into `skipped` so a forgotten task can't park a prospect forever. Task queue ages feed the RX-2 queue-health alerting.
+
+### 8.14 Reply-flow extensions (PRD FR-4.3/4.4/4.5 — P1)
+
+- **Objection library (FR-4.3):** `OBJECTION_TAG` output upserts `objections` rows (taxonomy class, thread links, cohort). Each class may carry an **operator-approved counter-snippet** in tenant config; the reply agent may use it in its one agentic exchange (the `replies.agentic_exchanges` DB counter, §9.4, is the enforcement — not the prompt). Novel or unresolved objections escalate. The digest aggregates frequency/trend per cohort; pgvector similarity (OQ-3) clusters near-duplicate phrasings under one class.
+- **Referral flow (FR-4.4):** strictly event-gated — the trigger predicate (`converted` or classified enthusiastic-positive) is checked in code at enqueue time, and an `entity.referral_asked` flag makes the ask once-per-entity-ever. Referred candidates enter discovery with `source_adapter='referral'`, `data_basis='referral'` provenance. **On-behalf-of invites** (use case C) are drafts *delivered to the converted provider* (email to them, or a human task) with their recorded consent stored on the resulting touch; the framework never sends as the provider — sender-identity validators (FR-3.8) make a forged peer-to-peer From unrepresentable.
+- **No-show handling (FR-4.5):** the `book_calendar` action records a booking ref; a missed-booking event (calendar webhook or operator event) permits **one** re-engagement touch after the configured delay — composed and claimed through the full COLD gate profile (frequency caps respected). A second no-show calls `transition(declined)` with a 6-month cooldown; the state machine has no edge back, so rebooking loops are structurally impossible.
 
 ## 9. LLM Subsystem
 
 ### 9.1 Task registry
-Closed enum of tasks: `EXTRACT_FACTS, QUALIFY, COMPOSE, GROUNDEDNESS_AUDIT, CLASSIFY_REPLY, OBJECTION_TAG, DISCOVERY_RESEARCH, VARIANT_GENERATE, SYNTHESIZE_PROGRAM, BRAINSTORM_GOALS(P1), WINLOSS_SYNTH(P2)`. (`SYNTHESIZE_PROGRAM` and `DISCOVERY_RESEARCH`/`BRAINSTORM_GOALS` run on the high-reasoning model tier; they're low-frequency.) Each task: pinned prompt (versioned file `prompts/<task>/<semver>.md`, hash recorded in traces), model tier, max tokens, output schema, spend category.
+Closed enum of tasks: `EXTRACT_FACTS, QUALIFY, COMPOSE, GROUNDEDNESS_AUDIT, CLASSIFY_REPLY, OBJECTION_TAG, DISCOVERY_RESEARCH, VARIANT_GENERATE, SYNTHESIZE_PROGRAM, RESEARCH_NOTE(P1), SENDER_RESEARCH(P1), PHI_SCREEN(P1), BRAINSTORM_GOALS(P1), ARTIFACT_GENERATE(P2), WINLOSS_SYNTH(P2)`. (`SYNTHESIZE_PROGRAM` and `DISCOVERY_RESEARCH`/`BRAINSTORM_GOALS` run on the high-reasoning model tier; they're low-frequency.) Each task: pinned prompt (versioned file `prompts/<task>/<semver>.md`, hash recorded in traces), model tier, max tokens, output schema, spend category.
 
 ### 9.2 Structured output, closed schemas
 Every task's output is parsed into a pydantic model with `extra='forbid'`. Failed parses retry once with the validation error appended, then fail the job (→ retry/DLQ). Agents never emit free-form actions: `CLASSIFY_REPLY` returns `{intent: Enum, confidence: float, action: Enum-of-allowlist, action_args: TypedDict}` — an action outside the tenant's registered allowlist fails schema validation before any side effect exists (I-5).
@@ -441,7 +509,7 @@ Per campaign, EWMA (half-life 20 replies) over scored replies: interested +2, ne
 ## 11. API & Webhook Surface
 
 ### 11.1 Authentication
-Static bearer tokens in env (`OR_API_TOKENS="<id>:<hash>:<scopes>"`), constant-time compared, scoped: `events:write`, `conversions:write`, `privacy:write` (forget), `control:write` (halt/resume), `read`. The dashboard uses a session cookie (operator login from env-configured credentials) and only `read` + queue-decision scopes.
+Static bearer tokens in env (`OR_API_TOKENS="<id>:<hash>:<scopes>"`), constant-time compared, scoped: `events:write`, `conversions:write`, `privacy:write` (forget), `control:write` (halt/resume), `read`. The dashboard uses a session cookie (operator login from env-configured credentials) with `read` + queue-decision scopes, plus `manage:write` when the management surface (§11.4) is enabled.
 
 ### 11.2 Endpoints (v1)
 
@@ -451,13 +519,30 @@ Static bearer tokens in env (`OR_API_TOKENS="<id>:<hash>:<scopes>"`), constant-t
 | `POST /v1/conversions` | conversions:write | §8.8 attributed conversion. |
 | `POST /v1/forget` | privacy:write | §13.3; 200 only after local deletion commits (provider propagation async with receipt). |
 | `POST /v1/halt` · `/v1/resume` | control:write | §7.6 halt semantics; resume audited with token id. |
-| `GET /v1/funnel`, `/v1/queues`, `/v1/costs` | read | Reporting (FR-8.x). |
+| `GET /v1/funnel`, `/v1/queues`, `/v1/costs` | read | Reporting (FR-8.x); funnel includes per-stage abandonment counts (FR-9.2). |
+| `GET /v1/transcripts?entity=…` | read | FR-1.6: threaded conversation export — CRM-agnostic sync to the operator's own systems. |
+| `GET /v1/audit?entity=…` | read | FR-7.5: full per-entity audit export (every touch, source, provenance, consent-relevant event) — the honest answer to "how did you get my info?". |
+| `POST /v1/programs` | manage:write | FR-9.1: Brief in → synthesis job → Program Proposal id (202). |
+| `POST /v1/proposals/{id}/approve` · `/decline` | manage:write | applies/declines any proposal kind (program, cohort, rebalance, merge); same policy gates as the CLI. |
+| `POST /v1/campaigns/{id}/pause` · `/resume` | manage:write | pause is immediate (`control_flags` scope=campaign); resume audited with actor. |
+| `GET /a/{token}` | public | §8.12 attributed asset links: MAC-verified token → tracked redirect/render; invalid ⇒ 404. |
 | `POST /hooks/{provider}` | provider HMAC | §8.5. Unsigned/invalid ⇒ 401 + alert counter (gate 13). |
 
 Outbound webhooks (proposals, escalations, gate trips, digest) are HMAC-SHA256 signed (`X-OR-Signature`, timestamped, 5-retry backoff).
 
 ### 11.3 Python API
 `open_reachout.Client` wraps the same service layer in-process (no HTTP) for operators embedding the framework; CLI and REST are thin shells over this layer (FR-1.6's "no parallel implementations").
+
+### 11.4 Dashboard (PRD §7.9)
+
+htmx server-rendered views over the service layer — no JS framework, CSP-strict (§15). Four view families:
+
+- **Funnel (FR-9.2, P0):** per campaign/cohort — headline metrics (reached, replies, positive, conversions), the stage funnel, and the abandonment table computed directly from prospect terminal states (§5.4) so "where people fall off" is the state machine rendered, not a parallel metric.
+- **Drill-down (FR-9.3, P0):** campaign → cohorts → strategies → members, each level rendering its research tier (§8.10); strategy level shows bandit arms with live/paused status and posteriors (§10.1); member level shows the Evidence Card (facts, provenance, observed-at) and the threaded conversation.
+- **Queues (RX-1, P0):** proposals, escalations, merges, dry-run review, ramp approvals (§8.4) — single-keystroke triage parity with the CLI.
+- **Campaign management (FR-9.1, P1, behind `manage:write`):** Brief form → `POST /v1/programs`, Program Proposal review with the sample emails inline, pause/resume, and the rebalancing console (FR-9.4: §8.11 flags shown inline in the funnel with one-click approve/decline; applied shifts annotate the funnel timeline).
+
+**Assumption that makes this safe:** the UI holds no privileged path. Every mutation goes through the same service layer, policy gates, and audit events as the CLI; the gates (suppression, budgets, halt, always-human set) sit *below* the API, so a dashboard bug can degrade UX but cannot widen authority. CSRF tokens on every mutating form; bulk-approve keeps its typed-confirmation friction (RX-3).
 
 ## 12. Entity Resolution
 
@@ -484,12 +569,19 @@ Daily (and post-campaign-burst) jobs pull provider analytics; rolling 7-day comp
 ### 13.5 Claim registry hook (P1)
 `claim_registry(tenant, claim_id, version, text, approved_by, status)` ships in the 0.1 schema; the composer records `claim_registry_version` in traces from day one (initially the denylist-pack version), so flipping a tenant to allowlist mode (FR-3.2) is config, not migration.
 
+### 13.6 Sector-sensitivity screen (PRD FR-3.11, P1)
+For tenants configured `sector_sensitivity: healthcare` (or a custom pattern pack): a **deterministic pre-pass** (pattern battery — person-name + clinical-term proximity, DOB/MRN/insurance-ID shapes) plus an LLM screen (`PHI_SCREEN`, envelope-wrapped, structured `{phi_suspected, spans}`) run over (a) outbound bodies and reply-agent output, as a member of the compliance validator pack (so it runs at compose *and* re-runs in the claim transaction via hash binding, §7.3), and (b) operator-supplied payloads at ingest — `/v1/events` payloads and FR-2.10 import fields. A match rejects: compose-path content escalates to review, ingest-path requests get a 422 with reasons. **The deterministic pass alone is sufficient to block** — the rejection path has no LLM dependency, consistent with I-11's rule that compliance functions never wait on a model.
+
+### 13.7 Compliance-regime plugins (PRD FR-7.7, NG4 — P1)
+`ComplianceRegime` Protocol: `validators() -> list[Validator]` (regime-specific content checks), `required_identity_fields()`, `unsubscribe_semantics()` (latency bound, mechanism), `deletion_semantics()`. `us_can_spam` is the v1 implementation; regimes are selected per tenant in config and registered via entry points like adapters — but **additive-only by construction**: the effective validator pack is `core_nonbypassable ∪ regime`, composed in `core/compliance`, so a regime plugin can add strictness, never remove the core set (suppression, halt, deletion, claims lint stay regardless). Regime choice is recorded in decision traces.
+
 ## 14. Observability
 
 - **Traces:** OTel spans per job (`queue`, `tenant`, `attempt`), per gate-evaluation (each numbered gate a child span), per provider/LLM call (cost attributes). Trace id stored on `decision_traces` rows — DB-to-trace cross-navigation both ways.
 - **Metrics (canonical names):** `or_jobs_lag_seconds{queue}`, `or_claim_txn_ms`, `or_refusals_total{reason}`, `or_suppression_propagation_seconds`, `or_sends_total{tenant,cohort}`, `or_replies_total{intent}`, `or_complaint_rate_7d{domain}`, `or_groundedness_rate`, `or_spend_usd{category}`, `or_dlq_depth{queue}`, `or_queue_review_age_hours`.
 - **SLOs (reference deployment, alert templates shipped):** suppression/unsub propagation p95 < 5 min (page at 10); claim txn p95 < 50 ms; queue lag p95 < 5 min (control queue < 30 s); webhook ingest success > 99.9%; digest delivered weekly by Monday 09:00 tenant-local; review-queue p95 age < 48 h (RX-2).
 - **Logs:** structlog JSON; redaction processor strips secrets always and replaces email locals with `h:<sha8>` outside debug mode.
+- **Digest (FR-8.1):** a weekly scheduler job renders funnel/spend/experiment-movers/objection-trends/proposals/escalations/deliverability/correction-rate from the same service-layer queries the dashboard uses (one implementation, two renderers), deep-links into queue items (RX-2), and is delivered via the operator's own notification mailbox — never a prospect-facing sending domain (digest traffic must not touch outreach reputation).
 
 ## 15. Security Engineering
 
@@ -497,7 +589,7 @@ Implements PRD §8.7; deltas beyond what's said there:
 
 - **Key handling:** env-only; a startup sweep fails boot if any configured secret appears in config files; LLM prompt assembly runs through a scrubber that hard-fails on secret-pattern matches (defense against "summarize your configuration" injections).
 - **DB roles:** `or_app` (no DDL, no UPDATE/DELETE on append-only tables), `or_forget` (PII scrub only), `or_migrate` (Alembic only). Compose/api containers get `or_app`.
-- **Dashboard:** read-only DB role + decision-scoped writes through the service layer only; CSP, no third-party JS.
+- **Dashboard:** least-privilege DB role; all writes (queue decisions, campaign management §11.4) through the service layer only — same gates and audit path as the CLI; CSP, no third-party JS, CSRF on every mutating form.
 - **Supply chain:** lockfile (`uv`), `pip-audit` in CI, pinned base images, SBOM on release.
 - **Webhook endpoints:** per-provider HMAC (Smartlead/Instantly secrets), timestamp window ±5 min, replay-cache on signature.
 
@@ -521,6 +613,7 @@ CI release pipeline: lint+types → unit/contract → e2e → injection (fake) �
 - **Backup:** nightly `pg_dump` + WAL archiving hook (script shipped); `reachout doctor` warns if last backup > 26 h. Restore runbook in docs (and tested in CI quarterly job against the seeded snapshot).
 - **Upgrades:** `docker compose pull && reachout migrate && restart`; migrations are expand-contract (new code tolerates old schema for one release) so single-node upgrades have zero-downtime semantics anyway.
 - **Runbooks shipped:** burned-domain rotation, DLQ triage, provider outage, halt/resume, forget verification, restore.
+- **`reachout doctor` (FR-1.5)** is the one health surface, aggregating: provider connectivity/quota probes, DNS posture (SPF/DKIM/DMARC/MX against the Google/Microsoft bulk-sender floor), warmup status, webhook-signature config, key-scope warnings (§15), LLM-provider data-retention posture (S-6), backup age, queue/DLQ depth, and verifier-calibration drift. Each check returns `ok|warn|fail` with a remediation hint; `--json` for monitoring integration.
 
 ## 18. Performance & Capacity Commitments
 
@@ -583,6 +676,8 @@ import-linter contracts (CI-enforced):
 4. `operator_events` selector language (FR-2.9): start with structured filters (`{state, taxonomy[], cohort}`) only; no free-text query language until a real use case demands it.
 5. Whether the nightly real-model injection run needs its own reduced corpus to stay within research budget — tune at M2.
 6. Dashboard auth: env-credential login is fine for 0.1; revisit (OIDC?) only with O-4.
+7. Generated-artifact storage/rendering (§8.12): reuse `raw_documents`/BlobStore (D-8) and serve HTML via `/a/<token>`, or pre-render to PDF? Decide with the P2 artifact work; the `assets.content_ref` indirection keeps both open.
+8. PHI deterministic pattern battery (§13.6): false-positive rate on provider-to-provider professional content needs tuning against a labeled corpus from the therapist example before the screen defaults to `on` for healthcare tenants.
 
 ---
 

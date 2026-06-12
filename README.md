@@ -54,7 +54,13 @@ dispatches record bandit trials, interested replies record successes,
 bounces/complaints feed deterministic guardrail auto-pause, hostile or
 uncertain replies land in a real escalation queue (`reachout approve`),
 and `reachout report` prints the operator digest (funnel, budgets,
-replies, variant leaderboard, compliance, queue health). Beneath that,
+replies, variant leaderboard, compliance, queue health).
+**Event-triggered campaigns (FR-2.9) are live**: a cohort declared with
+`trigger: { event_type: compact.issuing }` stays dormant until the
+operator's own systems fire `POST /v1/events` — then matching qualified
+prospects start sequences and a selector-narrowed discovery pass runs,
+all through the full gate set (the therapist example ships a
+`compact_newly_eligible` cohort wired this way). Beneath that,
 the live-path safety core runs against real Postgres: the gatekeeper claim transaction (row-locked frequency
 caps, guarded budget counters with audited compensation, mailbox capacity,
 hash binding), alias+tombstone-aware suppression, `reachout halt`/`resume`
@@ -87,7 +93,8 @@ reachout dry-run examples/music-marketplace/tenant.yaml --n 3   # fake LLM
 | Doc | Contents |
 |---|---|
 | [`PRD.md`](PRD.md) | Full framework requirements: plugin interfaces, pipeline, domain model, compliance core, experimentation engine, discovery agent, OSS requirements (license, responsible use, docs), acceptance gates, milestones, risks, customer-needs traceability |
-| [`docs/engineering-spec.md`](docs/engineering-spec.md) | System architecture & engineering spec: system invariants and their enforcement mechanisms, schema, job system, the Gatekeeper send path, LLM/injection subsystem, stats engine, API surface, compliance subsystems, testing/gate suite, ops, failure-mode analysis |
+| [`docs/engineering-spec.md`](docs/engineering-spec.md) | System architecture & engineering spec: system invariants and their enforcement mechanisms, component inventory, schema, job system, the Gatekeeper send path, LLM/injection subsystem, stats engine, API surface + dashboard, compliance subsystems, testing/gate suite, ops, failure-mode analysis |
+| [`docs/requirements-traceability.md`](docs/requirements-traceability.md) | Every PRD requirement mapped to its owning component, engineering-spec design section, and verification method (gate / contract suite / CI / SLO) |
 | [`research/market-research-report.md`](research/market-research-report.md) | The deep-research report behind the PRD: competitive landscape, compliance/deliverability constraints, build-vs-buy stack, benchmarks — multi-source, adversarially verified, fully cited |
 
 The full prospecting pipeline runs through the worker against Postgres:
