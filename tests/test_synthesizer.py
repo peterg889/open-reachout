@@ -101,3 +101,17 @@ def test_cli_init_writes_program_and_proposal(tmp_path: Path) -> None:
     # validate the generated file through the CLI too (one config system)
     check = CliRunner().invoke(app, ["validate", str(tmp_path / "tenant.yaml")])
     assert check.exit_code == 0, check.output
+
+
+def test_gemini_schema_adapter_inlines_refs_and_drops_additional_props() -> None:
+    """The Gemini Developer API rejects additionalProperties and $ref;
+    strictness stays local (pydantic model_validate on the way back in)."""
+    from open_reachout.adapters.llm.gemini_backend import _gemini_schema
+    from open_reachout.agents.schemas import ComposeOutput
+
+    schema = _gemini_schema(ComposeOutput)
+    flat = repr(schema)
+    assert "additionalProperties" not in flat
+    assert "$ref" not in flat and "$defs" not in flat
+    # nested Claim model survived inlining
+    assert schema["properties"]["claims"]["items"]["properties"]["fact_id"]

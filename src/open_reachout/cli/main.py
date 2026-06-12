@@ -251,8 +251,17 @@ def dry_run(
                         ]
                     )
 
+    if nppes_csv:
+        # Registry-sourced dry runs use real registry evidence (license,
+        # credential, location, provenance) — the honest floor before web
+        # enrichment is configured.
+        from open_reachout.adapters.enrich.registry import RegistryEnricher
+
+        enricher = RegistryEnricher()
+    else:
+        enricher = FakeEnricher()
     report = dryrun.run(
-        cfg, sources, FakeEnricher(), FakeFinder(), FakeVerifier(), backend, n, out  # type: ignore[arg-type]
+        cfg, sources, enricher, FakeFinder(), FakeVerifier(), backend, n, out  # type: ignore[arg-type]
     )
     typer.secho(
         f"dry-run: {len(report.composed)} drafts, {len(report.disqualified)} disqualified, "

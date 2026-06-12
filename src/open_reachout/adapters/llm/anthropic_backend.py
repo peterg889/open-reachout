@@ -15,7 +15,9 @@ from pydantic import BaseModel
 REASONING_MODEL_DEFAULT = "claude-opus-4-8"
 FAST_MODEL_DEFAULT = "claude-sonnet-4-6"
 
-_REASONING_TASKS = {"synthesize_program", "discovery_research", "brainstorm_goals", "winloss"}
+_REASONING_TASKS = {
+    "synthesize_program", "discovery_research", "brainstorm_goals", "winloss_synth",
+}
 
 _MAX_TOKENS = {"compose": 2048, "groundedness": 1024, "qualify": 1024, "classify_reply": 512}
 _MAX_TOKENS_DEFAULT = 4096
