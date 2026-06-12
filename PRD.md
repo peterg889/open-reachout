@@ -157,7 +157,7 @@ class ExperimentPolicy(Protocol):
 
 ## 6. The Core Loop & Domain Model
 
-**Domain model:** `Tenant → Persona → Cohort → Prospect → Touch/Reply`, plus `Campaign/Sequence/Experiment/Variant`, `SuppressionList`, `Mailbox/SendingDomain`, `Proposal`, and two additions:
+**Domain model:** `Tenant → Persona → Cohort → Prospect → Touch/Reply`, plus `Campaign/Sequence/Experiment/Variant`, `SuppressionList`, `Mailbox/SendingDomain`, `Proposal`, and two additions. A **Variant is a versioned generation prompt with declared variable slots — not a message template.** There are no static templates anywhere in the system: every message is LLM-generated fresh from prompt + interpolated variables (§7.3), so per-prospect uniqueness is by construction and what the bandit is actually testing is *prompts*.
 
 - **Entity [P0]:** the resolved human/organization behind one or more Prospects. A person can match multiple personas — *a venue owner who is also a gigging musician must not be pitched by two campaigns in the same week, or ever contradictorily.* All prospects sharing an entity share frequency caps (§7.7), suppression, and conversation history; the composer sees the entity's full cross-campaign context. Resolution: deterministic (email, normalized domain/phone) + fuzzy (name+address) with operator-reviewable merge proposals. This problem is intrinsic to multi-persona tenants (a three-sided marketplace makes it unavoidable) and must live below the campaign layer.
 - **Objection [P1]:** a first-class record mined from replies (taxonomized: price, trust, timing, "already have a solution," etc.) with links to the threads that raised it. *The objections are the market research* — see §7.4/§7.5.
@@ -192,7 +192,22 @@ class ExperimentPolicy(Protocol):
 
 ### 7.3 Composition, sequencing & message quality
 
-- FR-3.1 **[P0]**: Composer = bandit-selected variant recipe + Evidence Card + persona voice. Non-bypassable post-generation validators: length cap; truthful, non-deceptive subject; physical address; unsubscribe; near-duplicate rejection; no fake "Re:/Fwd:"; **every factual claim about the prospect must cite an Evidence Card fact that passes staleness rules** (unevidenced claims are release-gated, §10).
+- FR-3.1 **[P0]**: **All outreach is LLM-generated from prompts + variables — no static templates.** The composer takes the bandit-selected variant (a versioned *generation prompt* authored by the operator in config) and interpolates declared variables into it, then the LLM writes the full subject and body fresh for each prospect. Non-bypassable post-generation validators: length cap; truthful, non-deceptive subject; physical address; unsubscribe; near-duplicate rejection (LLM outputs can converge — still checked); no fake "Re:/Fwd:"; **every factual claim about the prospect must cite an Evidence Card fact that passes staleness rules** (unevidenced claims are release-gated, §10).
+
+  Example variant (config):
+  ```yaml
+  variants:
+    - id: opener_calendar_hook_v3
+      surface: opener_strategy
+      attributes: { tone: warm, hook: their_calendar, cta: reply_question }
+      prompt: |
+        Write a first-touch email to {{prospect.first_name}}, who books music
+        at {{prospect.org_name}}. Open with a specific, genuine observation
+        about {{evidence.calendar_highlight}} — never generic flattery.
+        Then one sentence on {{persona.value_prop}}. Close by asking
+        {{variant.cta_question}}. {{persona.voice_rules}}
+  ```
+- FR-3.1a **[P0]**: **Typed variable registry.** Prompts may only reference declared variables; `reachout validate` fails on unknown slots. Variable classes: **trusted** (tenant/persona/campaign config — value props, voice rules, links), **prospect** (resolved identity fields), **untrusted** (Evidence Card facts, signal payloads, prior-thread excerpts — anything that originated on the open web or from a stranger). Untrusted variables are interpolated *only* inside the security envelope (engineering spec §9.3) — dropping scraped text into a prompt is an injection vector and is treated as one. Every send's resolved variable values are recorded in its decision trace (FR-8.5).
 - FR-3.2 **[P0 denylist / P1 allowlist]**: **Claims governance.** Denylist (P0): per-tenant deny-patterns checked post-generation — no ROI/earnings promises ("you'll get N clients"), no claims contradicting tenant pricing/terms config, no clinical/legal/financial advice, no implied existing relationship; core ships a default pack. Allowlist (P1): tenants may switch to a **versioned claim registry** — every marketing claim about *the operator's own product* must match an approved, versioned claim entry; the agent cannot invent marketing claims, and a claim-registry version is recorded on every sent message for auditability.
 - FR-3.3 **[P1]**: **Per-segment tone calibration.** Persona `voice` is overridable per cohort (a winery and a dive bar get different registers; a psychodynamic therapist and an LMFT intake coordinator do too), and tone is a taggable experiment attribute so calibration is learned, not guessed.
 - FR-3.4 **[P0]**: Budget gates at queue time: tenant monthly cap → cohort cap → **entity frequency cap (§7.7)** → inbox daily cap (default ≤25) → mailbox health. Failure = stays queued; no partial sends.
@@ -200,7 +215,7 @@ class ExperimentPolicy(Protocol):
 - FR-3.6 **[P1]**: **Human tasks as first-class sequence steps.** A sequence step may be `type: human_task` (e.g., "DM them on Instagram," "drop by the venue Thursday"): the framework generates a complete brief (entity context, evidence card, conversation history, suggested talking points) into the operator queue, pauses the sequence until the task is marked done/skipped, and logs the outcome as a Touch — so off-channel actions enrich the learning loop instead of breaking the pipeline.
 - FR-3.7 **[P0]**: Suppression + frequency check immediately before dispatch; open-tracking pixels disabled; prospect-local send windows.
 - FR-3.8 **[P0]**: **Sender-identity honesty + automation disclosure.** Messages are sent as a real, named person at the operator's company or an honestly-branded team identity — **fake-human personas are rejected by validation** (a sender identity must map to a declared real person or disclosed team/brand). Per-persona `disclose_automation` mode adds a brief, honest note that drafting is AI-assisted with a human reading replies; default **on** for sensitive personas (the therapist example runs with it on — the audience is drowning in spam harvested from their PT listings, and demonstrably-not-spam is the whole trust thesis).
-- FR-3.9 **[P1]**: **Follow-up value rule — no bump theater.** Every follow-up step must carry a substantively new, evidence-grounded angle (different value-prop facet, new fact, answer to a common objection). A lint rejects content-free bumps ("just floating this to the top!", "any thoughts?" bodies); follow-up recipes are distinct variant surfaces, not resends.
+- FR-3.9 **[P1]**: **Follow-up value rule — no bump theater.** Every follow-up step must carry a substantively new, evidence-grounded angle (different value-prop facet, new fact, answer to a common objection). A lint rejects content-free bumps ("just floating this to the top!", "any thoughts?" bodies); follow-up steps have their own generation prompts and are distinct variant surfaces, not resends.
 
 ### 7.4 Reply handling
 
@@ -216,7 +231,7 @@ class ExperimentPolicy(Protocol):
 - FR-5.1 **[P0]**: One experiment surface at a time per cohort; default policy Thompson sampling on the configured success metric.
 - FR-5.2 **[P0]**: Per-variant guardrails (complaint, unsub, bounce) pause a variant immediately regardless of reply performance.
 - FR-5.3 **[P0]**: Variants carry structured attribute tags (incl. tone, §7.3); hierarchical pooled model shares attribute effects across cohorts/tenants.
-- FR-5.4 **[P1]**: Agentic variant generation from winning attributes + reply-text mining + **objection data** (§7.4) — variants that pre-empt the top objection are an explicitly generated family. Copy-level variants auto-approvable; value-prop-level changes always `propose`.
+- FR-5.4 **[P1]**: Agentic variant generation — the agent writes new *generation prompts* (since variants are prompts, FR-3.1) from winning attributes + reply-text mining + **objection data** (§7.4); prompts that pre-empt the top objection are an explicitly generated family. Generated prompts may only reference registered variables (FR-3.1a) and pass the same validation. Prompt-level variants auto-approvable; value-prop-level changes always `propose`.
 - FR-5.5 **[P2]**: Automated win/loss synthesis: periodic LLM pass over converted-vs-declined threads producing a narrative "why we win / why we lose" memo in the digest (extends the objection library).
 - FR-5.6 **[P1]**: **Campaign-level sentiment auto-throttle.** Beyond per-variant guardrails, a rolling reply-sentiment score per campaign (negative/hostile share, objection density, unsub trend) automatically throttles send rate when a campaign is going sour and pauses + alerts past a threshold — souring is visible in replies before it shows up in complaint rates, and the framework should react at the earlier signal.
 

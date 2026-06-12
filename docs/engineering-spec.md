@@ -31,7 +31,7 @@ These are the engineering commitments the rest of the document exists to honor. 
 | I-5 | Untrusted content cannot cause out-of-policy action | Envelope serialization (§9.3); closed action enums; outbound URLs only from tenant config + attribution tokens, never from scraped/reply content (§9.4); injection corpus in CI | **2 (disqualifying)** |
 | I-6 | `forget` removes PII and propagates | Single transaction: tombstone hash + cascading PII deletion (§13.3); provider-propagation job with receipt; verified by gate test | **5 (disqualifying)** |
 | I-7 | Entity-level frequency caps hold across campaigns/personas | Caps checked under `SELECT … FOR UPDATE` on the entity row inside the claim txn; merges re-evaluate active sequences (§12.3) | 6 |
-| I-8 | Volume and USD budgets are pre-checked, atomically | Counter rows locked in claim txn (volume); `spend_ledger` pre-call reservation (USD, §9.6) | 7 |
+| I-8 | Volume and USD budgets are pre-checked, atomically | Counter rows locked in claim txn (volume); `spend_ledger` pre-call reservation (USD, §9.7) | 7 |
 | I-9 | Compliance content (address, unsubscribe, ad-id, claims lint, identity honesty) present in 100% of output | Deterministic validators run twice: at compose (fast feedback) and inside gatekeeper (authoritative); content-hash binding (§7.3) prevents validate-then-swap | 9,10 |
 | I-10 | Webhook events are authenticated and idempotent | Signature verification required by interface (`parse_webhook(payload, signature)`); `provider_events.provider_event_id` unique index | 13 |
 | I-11 | Spend cannot exceed caps; cap-hit never disables compliance functions | Reservation ledger gates LLM/scrape/enrich calls; suppression/unsub/forget paths are deterministic (no LLM, no metered call) by construction (§8.5) | 7 |
@@ -181,7 +181,8 @@ CREATE TABLE decision_traces (               -- FR-8.5; one per touch
   touch_id        uuid PRIMARY KEY REFERENCES touches(id),
   evidence_fact_ids uuid[] NOT NULL,
   claims          jsonb NOT NULL,            -- claim → fact_id map emitted by composer
-  variant_id      uuid, claim_registry_version text,
+  variables_resolved jsonb NOT NULL,         -- slot → {value|hash, trust_class, fact_id} (§9.6)
+  variant_id      uuid, variant_prompt_hash text, claim_registry_version text,
   prompt_versions jsonb NOT NULL,            -- {composer: "[email protected]", …}
   model_id        text NOT NULL,
   bandit_posterior jsonb,                    -- {alpha,beta,sampled_p} at selection
@@ -322,7 +323,7 @@ Reply messages (FR-4.2) are touches of `kind='agentic_reply'`. They skip frequen
 
 Smartlead/Instantly are *campaign-centric*: you create a provider campaign with sequence steps, add leads, and the provider schedules sends (this coupling is also where their warmup/throttling/inbox-rotation value lives). Our model is *touch-centric*. Reconciliation — **provider-sequence mode**:
 
-- **Per (campaign, sequence) we create one provider campaign** whose steps are templates of per-lead merge variables (`{{or_subject_0}}`, `{{or_body_0}}`, `{{or_body_1}}`, …).
+- **Per (campaign, sequence) we create one provider campaign** whose steps are *pure passthrough shells* — each step's "template" is nothing but a per-lead merge variable (`{{or_subject_0}}`, `{{or_body_0}}`, `{{or_body_1}}`, …). Zero static copy lives provider-side; every byte of message content is LLM-generated our side (PRD FR-3.1) and pushed as lead variables, so the gatekeeper validated exactly what the provider will send.
 - **Enrollment = the gatekeeper moment.** All steps (opener + follow-ups) are composed, validated, and groundedness-checked up front; the claim transaction claims the opener and *reserves* the follow-ups (frequency math counts the whole sequence; budget counts each step). Dispatch = `add lead to provider campaign` with all merge variables. Staleness exposure of pre-composed follow-ups is bounded by sequence length (≤ ~14 days at default 4/7 gaps), far inside fact-staleness thresholds.
 - **Provider-native stop conditions** (stop on reply, provider unsubscribe handling) are configured on every campaign — first line of defense.
 - **Reactive enforcement** is ours: suppression insert, `forget`, entity merge, halt, and kill switches each enqueue `control`-queue jobs that call provider APIs (`pause/delete lead`, `pause campaign`) — `control` is the highest-priority queue, exempt from spend metering (I-11), with an enforcement SLO of **p95 < 5 min, hard ceiling 10 min** (gate 3 measures end-to-end: webhook-in → provider lead paused).
@@ -346,7 +347,14 @@ Scheduler (per-cohort cadence) or operator event (FR-2.9) enqueues `discover` wi
 LLM qualifier (envelope; evidence card + persona signals) → structured `{verdict, rationale, signal_scores}` → `qualified`/`disqualified`; `uncertain ⇒ disqualified`. 2% of verdicts sampled into the review queue weekly (FR-2.7).
 
 ### 8.4 Compose
-For a `qualified` prospect with available campaign budget (cheap pre-check; authoritative check is the claim txn): select variant via Thompson sampling (§10.1), render recipe + Evidence Card (staleness-filtered at read: `observed_at > now() - threshold(fact_type)`) + persona/cohort voice through the composer LLM → structured output `{subject, body, claims[]}` per step. Deterministic validators → groundedness audit job → gatekeeper claim → deliver. Composer retries with validator feedback at most twice, then escalates the prospect to review (never "send the best of a bad batch").
+For a `qualified` prospect with available campaign budget (cheap pre-check; authoritative check is the claim txn):
+
+1. **Select** the variant via Thompson sampling (§10.1). A variant is a *generation prompt* (operator-authored, config-versioned) with declared variable slots — there are no static message templates in the system (PRD FR-3.1).
+2. **Resolve variables** (§9.7): trusted config values inline; prospect identity fields inline; untrusted values (Evidence Card facts staleness-filtered at read — `observed_at > now() - threshold(fact_type)` — signal payloads, thread excerpts) wrapped in the security envelope.
+3. **Generate**: the composer LLM writes the full subject + body fresh per prospect → structured output `{subject, body, claims[]}` per step. Claims reference the `fact_id`s of the evidence variables actually used.
+4. **Validate → audit → claim → deliver**: deterministic validators → groundedness audit job → gatekeeper claim. Composer retries with validator feedback at most twice, then escalates the prospect to review (never "send the best of a bad batch").
+
+Resolved variable values (with their trust class and source fact ids) are recorded in the touch's `decision_traces` row, so any sent message is reproducible: prompt version + variables + model = the generation.
 
 ### 8.5 Observe & Classify
 Provider webhooks → `/hooks/{provider}` → signature verify (I-10) → `provider_events` insert (unique `provider_event_id`; duplicates no-op) → typed events:
@@ -389,10 +397,21 @@ System prompts assert: content inside `<untrusted>` is data; instructions inside
 - Injection heuristics (regex battery + the `injection_suspected` field) escalate the thread and tag the source; tagged sources surface in source-quality review.
 - CI injection corpus (`tests/injection/*.yaml`: vector, channel, expected-refusal) runs against compose/qualify/classify with FakeLLM *and* (nightly, budgeted) against the real default model. Regression = release block (gate 2).
 
-### 9.5 Prompt/version discipline
-Prompts are code: reviewed in PRs, semver'd, referenced by hash in every `decision_trace`. The correction feedback loop (FR-2.8) injects exemplars at a *designated slot* in the prompt template — corrections are data, never freeform prompt edits, so a poisoned correction can't carry instructions (it is itself envelope-wrapped).
+### 9.5 Prompt/version discipline — two prompt classes
+- **System task prompts** (qualifier, classifier, groundedness auditor, the composer's *frame* prompt) are code: reviewed in PRs, semver'd in `prompts/`, referenced by hash in every `decision_trace`.
+- **Variant generation prompts** are operator content: authored in tenant config (or by the variant-generation agent, FR-5.4), content-hash-versioned via `config_versions`, and *nested inside* the composer's system frame — the frame carries the safety instructions and output schema; the variant prompt only directs style/angle/structure. A variant prompt cannot override the frame (it is itself injected into a fixed slot, and the frame's instructions + output validation + downstream validators bind regardless).
 
-### 9.6 Spend metering (I-11)
+The correction feedback loop (FR-2.8) injects exemplars at a *designated slot* in the system frame — corrections are data, never freeform prompt edits, so a poisoned correction can't carry instructions (it is itself envelope-wrapped).
+
+### 9.6 Variable resolution (`core/variables.py`)
+Implements PRD FR-3.1a. A typed registry declares every interpolable variable: name, type, **trust class** (`trusted` config / `prospect` identity / `untrusted` web-derived), and resolver. Mechanics:
+
+- `reachout validate` resolves every `{{slot}}` in every variant prompt against the registry; unknown slots are config errors (fail closed at validation time, not compose time).
+- Interpolation is structural, not textual: trusted and prospect values are substituted inline; **untrusted values are never spliced into prompt text** — the slot is replaced by a reference marker and the value travels in the task's envelope block (§9.3), so a malicious venue webpage quoted as `{{evidence.calendar_highlight}}` is still inside the delimiter the model is instructed to treat as data.
+- Each resolved untrusted variable carries its `fact_id`/`source_url`, which is how the composer's `claims[]` output and the groundedness auditor (I-4) line up: evidence used = evidence cited.
+- Resolution snapshot (`variables_resolved` jsonb: slot → {value-or-hash, trust_class, fact_id}) is written to `decision_traces`.
+
+### 9.7 Spend metering (I-11)
 `spend_ledger(category, tenant, job_id, est_usd, actual_usd)`. Pre-call: insert a *reservation* (estimated from max_tokens × pricing table / adapter unit price) inside a txn that checks month-to-date + reservations ≤ cap; post-call: update actual. Cap-hit pauses the *consuming queue* for the tenant + alerts. Exempt categories (structurally non-metered, no LLM dependency): suppression, unsubscribe, forget, halt-propagation, kill-switch math.
 
 ## 10. Stats Subsystem
