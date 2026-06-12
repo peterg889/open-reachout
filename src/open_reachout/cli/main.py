@@ -1,5 +1,5 @@
-"""Open Reachout CLI (PRD FR-1.x). M0: validate + doctor are real; pipeline
-commands land with their milestones and say so honestly instead of pretending."""
+"""Open Reachout CLI (PRD FR-1.x). Working: validate, doctor, dry-run, run,
+halt/resume, forget, approve, report. Remaining stubs say so honestly."""
 
 from __future__ import annotations
 
@@ -248,13 +248,45 @@ def forget(ref: str) -> None:
 
 
 @app.command()
-def approve() -> None:
-    _not_yet("M3")
+def approve(
+    resolve: str = typer.Option(None, help="escalation id to resolve"),
+    note: str = typer.Option("", help="resolution note (audited)"),
+) -> None:
+    """Work the escalation queue (FR-4.6, RX-1): list open items or resolve one."""
+    from open_reachout.core import escalations
+    from open_reachout.core.db import engine_from_env
+
+    actor = f"operator:{os.environ.get('USER', 'cli')}"
+    with engine_from_env().begin() as conn:
+        if resolve:
+            ok = escalations.resolve(conn, resolve, actor=actor, note=note)
+            typer.secho(
+                f"resolved {resolve}" if ok else f"{resolve} is not an open escalation",
+                fg="green" if ok else "yellow",
+            )
+            return
+        items = escalations.list_open(conn)
+    if not items:
+        typer.secho("escalation queue is empty", fg="green")
+        return
+    for item in items:
+        typer.echo(
+            f"{item.id}  [{item.subject_type}] {item.reason}\n"
+            f"    tenant={item.tenant} subject={item.subject_id} "
+            f"at={item.created_at:%Y-%m-%d %H:%M}\n"
+            f"    payload={item.payload}"
+        )
+    typer.echo(f"\n{len(items)} open. Resolve with: reachout approve --resolve <id>")
 
 
 @app.command()
 def report() -> None:
-    _not_yet("M3")
+    """Print the operator digest (FR-8.1)."""
+    from open_reachout.core.db import engine_from_env
+    from open_reachout.core.report import build_report
+
+    with engine_from_env().begin() as conn:
+        typer.echo(build_report(conn))
 
 
 def main() -> None:  # console_scripts shim

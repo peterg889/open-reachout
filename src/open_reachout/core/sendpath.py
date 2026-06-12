@@ -21,6 +21,7 @@ from open_reachout.core.queue import Job
 from open_reachout.core.states import ProspectState
 from open_reachout.core.store_pg import PgGateStore
 from open_reachout.core.worker import Handler, PermanentJobError
+from open_reachout.stats.persistence import record_trial
 
 
 def queue_draft(
@@ -152,6 +153,12 @@ def make_deliver_handler(
         # atomically; success + commit failure -> provider idempotency key
         # (= touch id) absorbs the retry (spec 7.4, failure-mode table).
         receipt = provider.send(result, gate_draft.draft.subject, gate_draft.draft.body)
+        variant_id = conn.execute(
+            text("SELECT variant_id FROM touches WHERE id = CAST(:i AS uuid)"),
+            {"i": touch_id},
+        ).scalar()
+        if variant_id:  # agentic replies carry no variant
+            record_trial(conn, gate_draft.tenant, str(variant_id))
         prospect_id = conn.execute(
             text("SELECT prospect_id FROM touches WHERE id = CAST(:i AS uuid)"),
             {"i": touch_id},

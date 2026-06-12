@@ -12,8 +12,13 @@ Self-hosted. BYO API keys. Compliance guardrails (CAN-SPAM, volume caps, suppres
 
 ## Status
 
-**M0–M1 complete, M2 in progress.** The live-path safety core now runs
-against real Postgres: the gatekeeper claim transaction (row-locked frequency
+**M0–M3 core complete.** The learning loop now runs end-to-end:
+dispatches record bandit trials, interested replies record successes,
+bounces/complaints feed deterministic guardrail auto-pause, hostile or
+uncertain replies land in a real escalation queue (`reachout approve`),
+and `reachout report` prints the operator digest (funnel, budgets,
+replies, variant leaderboard, compliance, queue health). Beneath that,
+the live-path safety core runs against real Postgres: the gatekeeper claim transaction (row-locked frequency
 caps, guarded budget counters with audited compensation, mailbox capacity,
 hash binding), alias+tombstone-aware suppression, `reachout halt`/`resume`
 (human-resume-only) and `reachout forget` (one-call deletion with receipts

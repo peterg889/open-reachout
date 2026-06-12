@@ -233,3 +233,30 @@ CREATE TABLE IF NOT EXISTS mailboxes (
 
 -- M2: mailbox assignment recorded at claim time (needed for dispatch retries).
 ALTER TABLE touches ADD COLUMN IF NOT EXISTS mailbox text;
+
+-- M3: bandit persistence and the escalation queue.
+CREATE TABLE IF NOT EXISTS variant_stats (
+  tenant     text NOT NULL,
+  variant_id text NOT NULL,
+  attributes jsonb NOT NULL DEFAULT '{}'::jsonb,
+  trials     int NOT NULL DEFAULT 0,
+  successes  int NOT NULL DEFAULT 0,
+  complaints int NOT NULL DEFAULT 0,
+  unsubs     int NOT NULL DEFAULT 0,
+  bounces    int NOT NULL DEFAULT 0,
+  paused     boolean NOT NULL DEFAULT false,
+  PRIMARY KEY (tenant, variant_id)
+);
+
+CREATE TABLE IF NOT EXISTS escalations (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant       text,
+  subject_type text NOT NULL,
+  subject_id   text NOT NULL,
+  reason       text NOT NULL,
+  payload      jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status       text NOT NULL DEFAULT 'open',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  resolved_at  timestamptz,
+  resolved_by  text
+);

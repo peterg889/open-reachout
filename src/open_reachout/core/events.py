@@ -12,13 +12,14 @@ import json
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from open_reachout.core import queue, suppression
+from open_reachout.core import escalations, queue, suppression
 from open_reachout.core.interfaces import EventKind, LLMBackend, ProviderEvent, SendingProvider
 from open_reachout.core.lifecycle import transition
 from open_reachout.core.queue import Job
 from open_reachout.core.replies import Action, route
 from open_reachout.core.states import ProspectState, TransitionError
 from open_reachout.core.worker import Handler, PermanentJobError
+from open_reachout.stats.persistence import record_guardrail, record_success
 
 PROVIDER_NAME = "provider"  # single-provider deployments; adapter name otherwise
 
@@ -53,15 +54,17 @@ def ingest_webhook(
     return processed
 
 
-def _prospect_for(conn: Connection, event: ProviderEvent) -> tuple[str, str, str] | None:
-    """(prospect_id, tenant_slug, email_canonical) from the event's touch ref."""
+def _prospect_for(
+    conn: Connection, event: ProviderEvent
+) -> tuple[str, str, str, str | None] | None:
+    """(prospect_id, tenant, email_canonical, variant_id) from the touch ref."""
     touch_id = event.touch_ref.get("touch_id")
     if not touch_id:
         return None
     row = conn.execute(
         text(
             """
-            SELECT p.id, t.slug, p.email_canonical
+            SELECT p.id, t.slug, p.email_canonical, tc.variant_id
             FROM touches tc
             JOIN prospects p ON p.id = tc.prospect_id
             JOIN tenants t ON t.id = p.tenant_id
@@ -70,7 +73,7 @@ def _prospect_for(conn: Connection, event: ProviderEvent) -> tuple[str, str, str
         ),
         {"i": touch_id},
     ).fetchone()
-    return None if row is None else (str(row[0]), row[1], row[2])
+    return None if row is None else (str(row[0]), row[1], row[2], row[3])
 
 
 def _safe_transition(conn: Connection, prospect_id: str, target: ProspectState) -> None:
@@ -95,22 +98,28 @@ def _act(conn: Connection, event: ProviderEvent) -> None:
     """Deterministic event handling (I-11: no LLM on these paths)."""
     ref = _prospect_for(conn, event)
     if event.kind is EventKind.BOUNCE and ref:
-        prospect_id, _tenant, email = ref
+        prospect_id, tenant, email, variant_id = ref
         if email:
             suppression.suppress(conn, email, reason="bounce")
+        if variant_id:
+            record_guardrail(conn, tenant, variant_id, "bounce")
         _safe_transition(conn, prospect_id, ProspectState.BOUNCED)
     elif event.kind is EventKind.COMPLAINT and ref:
-        prospect_id, _tenant, email = ref
+        prospect_id, tenant, email, variant_id = ref
         if email:
             suppression.suppress(conn, email, reason="complaint")
+        if variant_id:
+            record_guardrail(conn, tenant, variant_id, "complaint")
         _safe_transition(conn, prospect_id, ProspectState.DECLINED)
     elif event.kind is EventKind.UNSUBSCRIBE and ref:
-        prospect_id, _tenant, email = ref
+        prospect_id, tenant, email, variant_id = ref
         if email:
             suppression.suppress(conn, email, reason="unsubscribe")
+        if variant_id:
+            record_guardrail(conn, tenant, variant_id, "unsubscribe")
         _safe_transition(conn, prospect_id, ProspectState.UNSUBSCRIBED)
     elif event.kind is EventKind.REPLY and ref:
-        prospect_id, _tenant, _email = ref
+        prospect_id, _tenant, _email, _variant = ref
         reply_id = conn.execute(
             text(
                 """
@@ -164,6 +173,19 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
             return  # scrubbed by forget: nothing to classify
 
         decision = route(body, llm, agentic_exchanges=exchanges)
+        if decision.intent == "interested":
+            variant_row = conn.execute(
+                text(
+                    """
+                    SELECT tc.variant_id FROM replies r
+                    JOIN touches tc ON tc.id = r.touch_id
+                    WHERE r.id = CAST(:i AS uuid)
+                    """
+                ),
+                {"i": reply_id},
+            ).fetchone()
+            if variant_row and variant_row[0]:
+                record_success(conn, _tenant, variant_row[0])
         conn.execute(
             text(
                 """
@@ -191,16 +213,10 @@ def make_classify_handler(llm: LLMBackend) -> Handler:
             )
             _safe_transition(conn, str(prospect_id), ProspectState.DECLINED)
         elif decision.action is Action.ESCALATE:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO audit_events (subject_type, subject_id, event,
-                        payload, actor)
-                    VALUES ('reply', :i, 'escalated', CAST(:pl AS jsonb), 'system:classify')
-                    """
-                ),
-                {"i": reply_id, "pl": json.dumps({"reason": decision.reason,
-                                                  "intent": decision.intent})},
+            escalations.escalate(
+                conn, tenant=_tenant, subject_type="reply", subject_id=reply_id,
+                reason=decision.reason,
+                payload={"intent": decision.intent, "confidence": decision.confidence},
             )
 
     return classify
