@@ -16,7 +16,8 @@ Pre-code. Currently in research/specification phase.
 
 | Doc | Contents |
 |---|---|
-| [`PRD.md`](PRD.md) | Full framework requirements: plugin interfaces, pipeline, domain model, compliance core, experimentation engine, discovery agent, OSS requirements (license, responsible use, docs), milestones, risks |
+| [`PRD.md`](PRD.md) | Full framework requirements: plugin interfaces, pipeline, domain model, compliance core, experimentation engine, discovery agent, OSS requirements (license, responsible use, docs), acceptance gates, milestones, risks, customer-needs traceability |
+| [`docs/engineering-spec.md`](docs/engineering-spec.md) | System architecture & engineering spec: system invariants and their enforcement mechanisms, schema, job system, the Gatekeeper send path, LLM/injection subsystem, stats engine, API surface, compliance subsystems, testing/gate suite, ops, failure-mode analysis |
 | [`research/market-research-report.md`](research/market-research-report.md) | The deep-research report behind the PRD: competitive landscape, compliance/deliverability constraints, build-vs-buy stack, benchmarks — multi-source, adversarially verified, fully cited |
 
 ## Reference use cases (`examples/`, planned)
