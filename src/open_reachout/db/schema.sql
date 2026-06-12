@@ -289,3 +289,18 @@ CREATE TABLE IF NOT EXISTS proposals (
 );
 CREATE INDEX IF NOT EXISTS proposals_open ON proposals (tenant, dedupe_key)
   WHERE status = 'open';
+
+-- Research notes at every level of granularity (cohort -> strategy ->
+-- outreach). Prospect-level research lives in evidence_facts; these hold the
+-- cohort- and strategy-level findings that inform it.
+CREATE TABLE IF NOT EXISTS research_notes (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant     text NOT NULL,
+  level      text NOT NULL,                -- cohort|strategy
+  subject_id text NOT NULL,                -- cohort_id | variant_id
+  summary    text NOT NULL,
+  findings   jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS research_notes_latest
+  ON research_notes (tenant, level, subject_id, created_at DESC);

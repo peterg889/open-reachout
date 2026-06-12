@@ -498,6 +498,58 @@ def poll(
 
 
 @app.command()
+def research(
+    config_dir: Path = typer.Argument(..., help="tenant dirs"),  # noqa: B008 — typer idiom
+    llm: str = typer.Option("none", help="none (data-only) | gemini | anthropic narrative"),
+) -> None:
+    """Refresh research notes at every level: cohorts and strategies (the
+    prospect level is the Evidence Card, refreshed by enrichment)."""
+    from open_reachout.core import research as research_mod
+    from open_reachout.core.db import engine_from_env
+
+    backend = None
+    if llm == "gemini":
+        from open_reachout.adapters.llm.gemini_backend import GeminiBackend
+
+        backend = GeminiBackend()
+    elif llm == "anthropic":
+        from open_reachout.adapters.llm.anthropic_backend import AnthropicBackend
+
+        backend = AnthropicBackend()
+
+    tenants = sorted({load_tenant(f).tenant for f in config_dir.rglob("tenant.yaml")})
+    total = 0
+    with engine_from_env().begin() as conn:
+        for slug in tenants:
+            total += research_mod.refresh_all(conn, slug, backend)  # type: ignore[arg-type]
+    typer.secho(f"research: {total} note(s) refreshed", fg="green")
+
+
+@app.command()
+def demo(
+    config: Path = typer.Option(  # noqa: B008 — typer idiom
+        Path("examples/music-marketplace/tenant.yaml"), help="tenant.yaml to demo with"
+    ),
+) -> None:
+    """Seed a presentable demo: the real pipeline on fake data, simulated
+    replies, conversions, discovery, and research. Then `reachout serve` and
+    open /dashboard."""
+    from open_reachout.core.db import apply_schema, engine_from_env
+    from open_reachout.core.demo import seed_demo
+
+    engine = engine_from_env()
+    with engine.begin() as conn:
+        apply_schema(conn)
+    stats = seed_demo(engine, config)
+    typer.secho(
+        f"demo seeded: {stats['sent']} sent, {stats['replies']} replies, "
+        f"{stats['converted']} converted, {stats['research_notes']} research notes",
+        fg="green",
+    )
+    typer.echo("now: reachout serve  ->  http://127.0.0.1:8714/dashboard")
+
+
+@app.command()
 def serve(
     host: str = typer.Option("127.0.0.1"),
     port: int = typer.Option(8714),

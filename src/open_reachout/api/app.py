@@ -77,6 +77,10 @@ def create_app(
 
     app = FastAPI(title="Open Reachout", docs_url=None, redoc_url=None)
 
+    from open_reachout.api.dashboard import build_dashboard_router
+
+    app.include_router(build_dashboard_router(engine))
+
     def require(scope: str):
         def check(authorization: str = Header(default="")) -> ApiToken:
             secret = authorization.removeprefix("Bearer ").strip()

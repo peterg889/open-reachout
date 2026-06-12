@@ -25,6 +25,20 @@ inboxes and feeds the same event pipeline as provider webhooks, and
 Google/Microsoft bulk-sender floor before you send. (Managed providers
 like Smartlead remain an option for bundled warmup/rotation.)
 
+**Presentable dashboard.** `reachout demo && reachout serve` then open
+`http://127.0.0.1:8714/dashboard`: top-level metrics (reached, replies,
+positive responses, conversions) with a funnel and an explicit
+*abandonment* table showing where the flow loses people; cohorts the
+system is working, each drilling into the **strategies being tested**
+(bandit arms with live/paused status and per-strategy research notes)
+and the **members** of the cohort; each member drills into their
+**background research** (Evidence Card with provenance and observation
+dates) and the full **conversation history** (sent drafts and replies,
+threaded). Research happens at every level of granularity — cohort notes
+inform segments, strategy notes inform prompts, evidence cards inform
+each email — refreshed by `reachout research` (data-only, or with an LLM
+narrative via `--llm gemini`).
+
 **M0–M4 core complete.** `reachout init --from-brief brief.yaml --tenant x`
 now compiles a Brief into a full program (personas, cohorts, generation
 prompts) with provenance and a Program Proposal containing sample emails —
