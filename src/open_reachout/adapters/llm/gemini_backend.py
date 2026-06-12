@@ -36,9 +36,11 @@ class GeminiBackend:
 
     def __init__(
         self,
-        reasoning_model: str = REASONING_MODEL_DEFAULT,
-        fast_model: str = FAST_MODEL_DEFAULT,
+        reasoning_model: str | None = None,
+        fast_model: str | None = None,
     ) -> None:
+        import os
+
         try:
             from google import genai
         except ImportError as exc:  # pragma: no cover
@@ -47,8 +49,13 @@ class GeminiBackend:
                 "pip install google-genai"
             ) from exc
         self._client = genai.Client()  # credentials resolved from environment
-        self.reasoning_model = reasoning_model
-        self.fast_model = fast_model
+        # D-6: tiers are operator-configurable; env overrides for deployments.
+        self.reasoning_model = reasoning_model or os.environ.get(
+            "OR_GEMINI_REASONING_MODEL", REASONING_MODEL_DEFAULT
+        )
+        self.fast_model = fast_model or os.environ.get(
+            "OR_GEMINI_FAST_MODEL", FAST_MODEL_DEFAULT
+        )
 
     def model_for(self, task: str) -> str:
         return self.reasoning_model if task in _REASONING_TASKS else self.fast_model

@@ -24,6 +24,8 @@ TAXONOMY_NAMES = {
     "103TP2701X": "Psychoanalysis Psychologist",
     "103G00000X": "Clinical Neuropsychologist",
     "1041C0700X": "Licensed Clinical Social Worker",
+    "101YM0800X": "Mental Health Counselor",
+    "101Y00000X": "Counselor",
 }
 
 
@@ -44,6 +46,9 @@ class RegistryEnricher:
         raw_taxonomies = ref.get("taxonomies", [])
         taxonomies = (
             [str(t) for t in raw_taxonomies] if isinstance(raw_taxonomies, list) else []
+        )
+        location = candidate.address or ", ".join(
+            str(v) for v in (ref.get("practice_city"), ref.get("practice_state")) if v
         )
         license_names = ", ".join(TAXONOMY_NAMES.get(t, t) for t in taxonomies)
         credential = str(ref.get("credential", "")).strip()
@@ -66,8 +71,7 @@ class RegistryEnricher:
                     f"Registry lists {candidate.display_name}"
                     + (f", {credential}" if credential else "")
                     + (f" as {license_names}" if license_names else "")
-                    + (f"; practice location {candidate.address}"
-                       if candidate.address else "")
+                    + (f"; practice location {location}" if location else "")
                     + "."
                 ),
                 source_url=source_url,

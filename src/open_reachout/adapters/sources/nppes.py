@@ -98,6 +98,10 @@ class NppesSource:
                 "npi": row.get(_NPI, ""),
                 "taxonomies": sorted(row_taxonomies & taxonomies),
                 "credential": row.get(_CRED) or "",
+                # The registry record's location survives into enrichment via
+                # source_ref (prospects don't persist the address column).
+                "practice_city": row.get(_CITY) or "",
+                "practice_state": row.get(_STATE) or "",
             },
             data_basis=self.data_basis,
         )
