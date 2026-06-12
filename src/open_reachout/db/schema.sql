@@ -222,3 +222,11 @@ DROP TRIGGER IF EXISTS trg_claim_lineage ON touches;
 CREATE TRIGGER trg_claim_lineage
   BEFORE UPDATE OF status ON touches
   FOR EACH ROW EXECUTE FUNCTION enforce_claim_lineage();
+
+CREATE TABLE IF NOT EXISTS mailboxes (
+  mailbox        text PRIMARY KEY,
+  tenant         text NOT NULL,
+  domain         text NOT NULL,
+  warmup_complete boolean NOT NULL DEFAULT false,
+  daily_cap      int NOT NULL DEFAULT 25
+);

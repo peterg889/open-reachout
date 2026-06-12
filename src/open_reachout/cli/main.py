@@ -147,20 +147,53 @@ def run() -> None:
 
 
 @app.command()
-def halt(tenant: str = typer.Option(None)) -> None:
+def halt(tenant: str = typer.Option(None, help="halt one tenant; omit for global")) -> None:
     """Stop all sending immediately; human resume only (FR-1.3, gate 4)."""
-    _not_yet("M2")
+    from open_reachout.core import control
+    from open_reachout.core.db import engine_from_env
+
+    scope = tenant or control.GLOBAL_SCOPE
+    with engine_from_env().begin() as conn:
+        control.halt(conn, scope=scope, actor=f"operator:{os.environ.get('USER', 'cli')}")
+    typer.secho(
+        f"HALTED scope={scope}. No claims or dispatches will proceed; provider "
+        "campaign pauses are queued. Only `reachout resume` restores sending.",
+        fg="red",
+    )
 
 
 @app.command()
-def resume(tenant: str = typer.Option(None)) -> None:
-    _not_yet("M2")
+def resume(tenant: str = typer.Option(None, help="resume one tenant; omit for global")) -> None:
+    """Clear a halt/kill-switch flag (human-only, invariant I-2)."""
+    from open_reachout.core import control
+    from open_reachout.core.db import engine_from_env
+
+    scope = tenant or control.GLOBAL_SCOPE
+    with engine_from_env().begin() as conn:
+        cleared = control.resume(
+            conn, scope=scope, actor=f"operator:{os.environ.get('USER', 'cli')}"
+        )
+    typer.secho(
+        f"resumed scope={scope}" if cleared else f"no active flag for scope={scope}",
+        fg="green" if cleared else "yellow",
+    )
 
 
 @app.command()
 def forget(ref: str) -> None:
-    """One-call data-subject deletion (FR-1.4, gate 5)."""
-    _not_yet("M2")
+    """One-call data-subject deletion (FR-1.4, gate 5): email or entity id."""
+    from open_reachout.core import forget as forget_mod
+    from open_reachout.core.db import engine_from_env
+
+    with engine_from_env().begin() as conn:
+        receipt = forget_mod.forget(conn, ref)
+    noun = "entity" if len(receipt.entity_ids) == 1 else "entities"
+    typer.secho(
+        f"forgotten: {len(receipt.entity_ids)} {noun}, "
+        f"{receipt.addresses_tombstoned} address(es) tombstoned. "
+        f"Receipt: {receipt.receipt_id} (provider propagation queued)",
+        fg="green",
+    )
 
 
 @app.command()

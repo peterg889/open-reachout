@@ -12,7 +12,17 @@ Self-hosted. BYO API keys. Compliance guardrails (CAN-SPAM, volume caps, suppres
 
 ## Status
 
-**M0 complete, M1 in progress.** Implemented and tested: the pure-logic core
+**M0–M1 complete, M2 in progress.** The live-path safety core now runs
+against real Postgres: the gatekeeper claim transaction (row-locked frequency
+caps, guarded budget counters with audited compensation, mailbox capacity,
+hash binding), alias+tombstone-aware suppression, `reachout halt`/`resume`
+(human-resume-only) and `reachout forget` (one-call deletion with receipts
+and provider-propagation jobs), the job queue (lease/retry/DLQ/reaper), and
+the reply pipeline whose unsubscribe path is deterministic — opt-outs never
+wait on a model. CI runs the whole suite, including the disqualifying gates,
+against a Postgres 16 service.
+
+Earlier milestones: Implemented and tested: the pure-logic core
 (canonicalization, state machine, config schemas, trust-classed variable
 registry, compliance validators, untrusted-content envelope, gatekeeper claim
 orchestration, job-queue SQL, schema with belt-and-braces triggers), plus the

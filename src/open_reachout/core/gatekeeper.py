@@ -77,6 +77,7 @@ class DraftTouch:
     groundedness_passed_hash: str | None
     profile: GateProfile
     validator_ctx: ValidatorContext
+    cohort_id: str = ""  # budget scope (I-8); unused by REPLY profile
 
 
 class GateStore(Protocol):

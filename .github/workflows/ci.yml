@@ -8,18 +8,31 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orx
+          POSTGRES_PASSWORD: orx
+          POSTGRES_DB: orx_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U orx" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      OR_TEST_DSN: postgresql+psycopg://orx:orx@127.0.0.1:5432/orx_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - name: Install
         run: |
           uv venv
-          uv pip install -e ".[dev]"
+          uv pip install -e ".[dev,postgres]"
       - name: Lint
         run: uv run ruff check src tests
-      - name: Tests
+      - name: Tests (incl. Postgres claim transaction)
         run: uv run pytest
-      - name: Acceptance gates (M0 subset)
+      - name: Acceptance gates
         # Disqualifying gate failures block release and cannot be waived
         # (PRD section 10 decision rule).
         run: uv run pytest -m gates
