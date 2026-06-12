@@ -95,3 +95,34 @@ def test_dashboard_token_gate(demo: dict[str, int], client: TestClient,
     monkeypatch.setenv("OR_DASHBOARD_TOKEN", "secret-token")
     assert client.get("/dashboard").status_code == 401
     assert client.get("/dashboard", params={"token": "secret-token"}).status_code == 200
+
+
+def test_campaign_page_shows_research_and_cohorts(
+    demo: dict[str, int], client: TestClient
+) -> None:
+    page = client.get("/dashboard/campaign/stagematch").text
+    assert "Campaign research" in page or "No campaign-tier research" in page
+    assert "Cohorts in this campaign" in page
+    assert "austin_venues_2026q3" in page
+
+
+def test_member_state_ledger_explains_transitions(
+    demo: dict[str, int], client: TestClient
+) -> None:
+    import re
+
+    overview = client.get(
+        "/dashboard/cohort/austin_venues_2026q3?tenant=stagematch"
+    ).text
+    member = re.search(r"/dashboard/member/[a-f0-9-]+", overview).group(0)
+    page = client.get(f"{member}?tenant=stagematch").text
+    assert "State ledger" in page
+    assert "reason" in page  # the why column exists with transitions in it
+
+
+def test_friendly_names_render_with_slug_secondary(
+    demo: dict[str, int], client: TestClient
+) -> None:
+    page = client.get("/dashboard").text
+    assert "Austin Venues — 2026 Q3" in page  # friendly
+    assert "austin_venues_2026q3" in page     # raw id stays discoverable

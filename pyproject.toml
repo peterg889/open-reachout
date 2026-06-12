@@ -18,7 +18,7 @@ dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.4", "mypy>=1.10", "fastapi>=0.110"
 postgres = ["psycopg[binary]>=3.1"]
 gemini = ["google-genai>=1.0"]
 anthropic = ["anthropic>=0.40"]
-api = ["fastapi>=0.110", "uvicorn>=0.29"]
+api = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
 dns = ["dnspython>=2.6"]
 
 [project.scripts]

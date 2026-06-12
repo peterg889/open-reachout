@@ -100,3 +100,36 @@ def test_ramp_send_reenters_claim_path(pg_engine, conn, seed, monkeypatch) -> No
             text("SELECT status FROM touches WHERE id = CAST(:i AS uuid)"), {"i": held}
         ).scalar()
         assert status == "drafted"                   # gatekeeper still ahead of it
+
+
+def test_new_campaign_onboarding_flow(pg_engine, conn, seed, monkeypatch) -> None:  # noqa: ANN001
+    """FR-9.1: Brief form -> synthesis job -> proposal queue (nothing sends)."""
+    conn.commit()
+    api = _client(pg_engine, monkeypatch, manage_token="m" * 24)
+    form_page = api.get("/dashboard/new-campaign?manage_token=" + "m" * 24)
+    assert form_page.status_code == 200
+    assert "Who should we find?" in form_page.text
+    good = {
+        "tenant": "nj-providers",
+        "find": "Licensed therapists in private practice across New Jersey",
+        "research": "Read their site for license type and new-client status",
+        "convert": "provider claims their verified profile",
+        "name": "TheraDirectory",
+        "what_we_do": "A verified therapist directory free until first inquiry",
+        "sender": "Dana Whitfield, TheraDirectory",
+        "physical_address": "210 Market St Suite 4, Camden NJ 08102",
+        "signup_link": "https://theradirectory.test/claim",
+        "monthly_prospects": "150",
+    }
+    resp = api.post("/dashboard/campaigns/new?manage_token=" + "m" * 24, data=good)
+    assert resp.status_code == 200 and "Synthesis queued" in resp.text
+    with pg_engine.begin() as c:
+        n = c.execute(text("SELECT count(*) FROM jobs WHERE queue='synthesize'")).scalar()
+        assert n == 1
+    # invalid brief: friendly validation feedback, no job
+    bad = dict(good, find="too short", tenant="bad2")
+    resp = api.post("/dashboard/campaigns/new?manage_token=" + "m" * 24, data=bad)
+    assert "needs a fix" in resp.text
+    with pg_engine.begin() as c:
+        n = c.execute(text("SELECT count(*) FROM jobs WHERE queue='synthesize'")).scalar()
+        assert n == 1

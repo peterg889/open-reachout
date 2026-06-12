@@ -128,6 +128,77 @@ def _state(value: object) -> str:
     return f"<span class='state {cls}'>{_e(value)}</span>"
 
 
+_ACRONYMS = {"nj", "tx", "ga", "us", "lcsw", "lpc", "lmft", "lac", "npi", "faq"}
+_QUARTER = __import__("re").compile(r"^(20\d{2})q([1-4])$")
+
+
+def _friendly(slug: object) -> str:
+    """Human display name for a snake_case id: 'nj_lcsw_lpc_2026q3' ->
+    'NJ LCSW LPC — 2026 Q3'. The raw id stays visible as secondary text."""
+    words: list[str] = []
+    suffix = ""
+    for part in str(slug).split("_"):
+        m = _QUARTER.match(part)
+        if m:
+            suffix = f" — {m.group(1)} Q{m.group(2)}"
+        elif part.lower() in _ACRONYMS:
+            words.append(part.upper())
+        else:
+            words.append(part.capitalize())
+    return (" ".join(words) or str(slug)) + suffix
+
+
+def _named(slug: object) -> str:
+    return f"{_e(_friendly(slug))} <span class='small'>({_e(slug)})</span>"
+
+
+def _ledger_rows(conn, prospect_id: str) -> str:  # noqa: ANN001
+    """The prospect's state ledger: every transition with its reason, plus
+    escalations — the answer to 'why is this prospect in this state?'."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT created_at, event, payload, actor FROM audit_events
+            WHERE subject_type = 'prospect' AND subject_id = :p
+            ORDER BY created_at
+            """
+        ),
+        {"p": prospect_id},
+    ).fetchall()
+    esc = conn.execute(
+        text(
+            """
+            SELECT created_at, reason, status FROM escalations
+            WHERE subject_type = 'prospect' AND subject_id = :p
+            ORDER BY created_at
+            """
+        ),
+        {"p": prospect_id},
+    ).fetchall()
+    out = []
+    for when, event, payload, actor in rows:
+        payload = payload or {}
+        if event == "transition":
+            change = f"{_state(payload.get('from'))} → {_state(payload.get('to'))}"
+            why = payload.get("reason") or ""
+        else:
+            change = f"<span class='tag'>{_e(event)}</span>"
+            why = payload.get("reason") or payload.get("note") or ""
+        out.append(
+            f"<tr><td class='small num'>{when:%Y-%m-%d %H:%M}</td>"
+            f"<td>{change}</td><td>{_e(why) or '<span class=small>—</span>'}</td>"
+            f"<td class='small'>{_e(actor)}</td></tr>"
+        )
+    for when, reason, status in esc:
+        out.append(
+            f"<tr><td class='small num'>{when:%Y-%m-%d %H:%M}</td>"
+            f"<td><span class='state {'warm' if status == 'open' else 'idle'}'>"
+            f"escalated{'' if status == 'open' else ' (resolved)'}</span></td>"
+            f"<td>{_e(reason)}</td><td class='small'>review queue</td></tr>"
+        )
+    return "".join(out) or "<tr><td colspan='4' class='small'>(no events yet)</td></tr>"
+
+
 def _check_token(request: Request) -> None:
     expected = os.environ.get("OR_DASHBOARD_TOKEN", "")
     if expected and request.query_params.get("token", "") != expected:
@@ -177,7 +248,8 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
                 ) or "<tr><td colspan='2' class='small'>(none — nobody lost yet)</td></tr>"
                 cohort_table = "".join(
                     f"<tr><td><a href='/dashboard/cohort/{_e(c.cohort_id)}"
-                    f"?tenant={_e(tenant)}'>{_e(c.cohort_id)}</a></td>"
+                    f"?tenant={_e(tenant)}'>{_e(_friendly(c.cohort_id))}</a>"
+                    f"<br><span class='small'>{_e(c.cohort_id)}</span></td>"
                     f"<td class='small'>{_e(c.persona_id)}</td>"
                     f"<td class='num'>{c.members}</td>"
                     f"<td class='num'>{c.contacted}</td><td class='num'>{c.replies}</td>"
@@ -187,7 +259,10 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
                 escal = len(escalations.list_open(conn, tenant))
                 props = len(proposals.list_open(conn, tenant))
                 sections.append(
-                    f"<h2>{_e(tenant)}</h2>{cards}"
+                    f"<h2><a href='/dashboard/campaign/{_e(tenant)}'>"
+                    f"{_e(_friendly(tenant))}</a> "
+                    f"<span class='small'>campaign — click for research &amp; "
+                    f"cohorts</span></h2>{cards}"
                     f"<h2>Cohorts the system is working</h2>"
                     f"<table><tr><th>cohort</th><th>persona</th><th>members</th>"
                     f"<th>contacted</th><th>replies</th><th>converted</th></tr>"
@@ -201,6 +276,55 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
                     f"proposal(s) — work them with <code>reachout approve</code>.</p>"
                 )
         return _page("Overview", "".join(sections) or "<p>No tenants yet.</p>")
+
+    @router.get("/dashboard/campaign/{tenant}", response_class=HTMLResponse)
+    def campaign(tenant: str, request: Request) -> HTMLResponse:
+        _check_token(request)
+        with engine.begin() as conn:
+            f = metrics.funnel(conn, tenant)
+            cohort_rows = metrics.cohorts(conn, tenant)
+            market = research.latest(conn, tenant, "campaign", tenant)
+            winloss = research.latest(conn, tenant, "winloss", tenant)
+            escal = len(escalations.list_open(conn, tenant))
+            props = len(proposals.list_open(conn, tenant))
+        cards = _cards([
+            ("reached (contacted)", f.contacted), ("replies", f.replies),
+            ("converted", f.converted),
+            ("conversion", f"{f.conversion_rate:.0%}" if f.contacted else "—"),
+            ("open escalations", escal), ("open proposals", props),
+        ])
+        research_html = (
+            f"<div class='note'><b>Campaign research — market view</b> "
+            f"<span class='small'>({market.created_at:%Y-%m-%d %H:%M})</span>"
+            f"<br>{_e(market.summary)}</div>"
+            if market else
+            "<div class='note small'>No campaign-tier research yet — run "
+            "<code>reachout research</code>.</div>"
+        )
+        if winloss:
+            research_html += (
+                f"<div class='note'><b>Why we win / why we lose</b>"
+                f"<br>{_e(winloss.summary)}</div>"
+            )
+        cohort_html = "".join(
+            f"<tr><td><a href='/dashboard/cohort/{_e(c.cohort_id)}"
+            f"?tenant={_e(tenant)}'>{_e(_friendly(c.cohort_id))}</a>"
+            f"<br><span class='small'>{_e(c.cohort_id)}</span></td>"
+            f"<td class='small'>{_e(_friendly(c.persona_id))}</td>"
+            f"<td class='num'>{c.members}</td><td class='num'>{c.contacted}</td>"
+            f"<td class='num'>{c.replies}</td><td class='num'>{c.converted}</td></tr>"
+            for c in cohort_rows
+        ) or "<tr><td colspan='6' class='small'>(no prospects yet)</td></tr>"
+        crumb = f"<p class='crumb'><a href='/dashboard'>overview</a> / {_e(tenant)}</p>"
+        return _page(
+            f"Campaign: {_friendly(tenant)}",
+            cards + research_html
+            + "<h2>Cohorts in this campaign</h2>"
+            + "<table><tr><th>cohort</th><th>persona</th><th>members</th>"
+              "<th>contacted</th><th>replies</th><th>converted</th></tr>"
+            + cohort_html + "</table>",
+            crumb=crumb,
+        )
 
     @router.get("/dashboard/cohort/{cohort_id}", response_class=HTMLResponse)
     def cohort(cohort_id: str, tenant: str, request: Request) -> HTMLResponse:
@@ -253,11 +377,12 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             for m in member_rows
         ) or "<tr><td colspan='5' class='small'>(none)</td></tr>"
         crumb = (
-            f"<p class='crumb'><a href='/dashboard'>overview</a>"
-            f" / {_e(tenant)} / {_e(cohort_id)}</p>"
+            f"<p class='crumb'><a href='/dashboard'>overview</a> / "
+            f"<a href='/dashboard/campaign/{_e(tenant)}'>{_e(tenant)}</a>"
+            f" / {_e(cohort_id)}</p>"
         )
         return _page(
-            f"Cohort: {cohort_id}",
+            f"Cohort: {_friendly(cohort_id)}",
             cards + note_html, crumb=crumb
             + "<h2>Strategies being tested (bandit arms)</h2>"
             + "<table><tr><th>variant</th><th>attributes</th><th>sends</th>"
@@ -274,6 +399,7 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
         _check_token(request)
         with engine.begin() as conn:
             detail = metrics.member_detail(conn, prospect_id)
+            ledger = _ledger_rows(conn, prospect_id) if detail else ""
         if detail is None:
             raise HTTPException(404, "no such prospect")
         evidence_html = "".join(
@@ -294,9 +420,10 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             for c in detail.conversation
         ) or "<p class='small'>(no outreach yet)</p>"
         crumb = (
-            f"<p class='crumb'><a href='/dashboard'>overview</a> / {_e(tenant)} / "
+            f"<p class='crumb'><a href='/dashboard'>overview</a> / "
+            f"<a href='/dashboard/campaign/{_e(tenant)}'>{_e(tenant)}</a> / "
             f"<a href='/dashboard/cohort/{_e(detail.cohort_id)}?tenant={_e(tenant)}'>"
-            f"{_e(detail.cohort_id)}</a> / {_e(detail.display_name)}</p>"
+            f"{_e(_friendly(detail.cohort_id))}</a> / {_e(detail.display_name)}</p>"
         )
         return _page(
             detail.display_name,
@@ -306,7 +433,10 @@ def build_dashboard_router(engine: Engine) -> APIRouter:
             + "<h2>Background research (Evidence Card)</h2>"
             + "<table><tr><th>type</th><th>fact</th><th>provenance</th></tr>"
             + evidence_html + "</table>"
-            + "<h2>Conversation history</h2>" + convo_html,
+            + "<h2>Conversation history</h2>" + convo_html
+            + "<h2>State ledger — why this prospect is where it is</h2>"
+            + "<table><tr><th>when</th><th>event</th><th>reason</th>"
+              "<th>actor</th></tr>" + ledger + "</table>",
             crumb=crumb,
         )
 

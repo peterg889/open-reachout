@@ -300,8 +300,10 @@ def make_qualify_handler(runtimes: dict[str, TenantRuntime], llm: LLMBackend) ->
             transition(conn, prospect_id, ProspectState.DISQUALIFIED,
                        actor="system:qualify", reason=verdict.rationale[:200])
             return
-        transition(conn, prospect_id, ProspectState.QUALIFIED, actor="system:qualify")
-        transition(conn, prospect_id, ProspectState.QUEUED, actor="system:qualify")
+        transition(conn, prospect_id, ProspectState.QUALIFIED,
+                   actor="system:qualify", reason=verdict.rationale[:200])
+        transition(conn, prospect_id, ProspectState.QUEUED, actor="system:qualify",
+                   reason="qualified: entering the compose queue")
         queue.enqueue(conn, "compose", {"prospect_id": prospect_id},
                       idempotency_key=f"compose:{prospect_id}")
 
