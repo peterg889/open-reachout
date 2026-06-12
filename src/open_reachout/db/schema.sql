@@ -271,3 +271,21 @@ CREATE TABLE IF NOT EXISTS operator_events (
   dedupe_key  text UNIQUE,
   received_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- M4: discovery-agent proposals (FR-6.1/6.2). Declined directions are
+-- remembered (dedupe_key) so the agent doesn't re-propose for 90 days.
+CREATE TABLE IF NOT EXISTS proposals (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant      text NOT NULL,
+  kind        text NOT NULL,              -- budget_shift|new_cohort|opportunity|value_prop
+  summary     text NOT NULL,
+  payload     jsonb NOT NULL DEFAULT '{}'::jsonb,
+  evidence    jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status      text NOT NULL DEFAULT 'open',  -- open|approved|declined
+  dedupe_key  text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz,
+  resolved_by text
+);
+CREATE INDEX IF NOT EXISTS proposals_open ON proposals (tenant, dedupe_key)
+  WHERE status = 'open';

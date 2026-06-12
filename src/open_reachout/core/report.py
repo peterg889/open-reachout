@@ -79,6 +79,18 @@ def build_report(conn: Connection) -> str:
         [f"- {eid} [{st}] {r} ({c:%Y-%m-%d %H:%M})" for eid, st, r, c in escalations],
     )
 
+    props = conn.execute(
+        text(
+            """
+            SELECT kind, summary FROM proposals
+            WHERE status = 'open' ORDER BY created_at ASC
+            """
+        )
+    ).fetchall()
+    out += _section(
+        "Open proposals (reachout approve)", [f"- [{k}] {s}" for k, s in props]
+    )
+
     suppressed = conn.execute(text("SELECT count(*) FROM suppressions")).scalar()
     tombstones = conn.execute(text("SELECT count(*) FROM forget_tombstones")).scalar()
     halted = conn.execute(text("SELECT scope, flag FROM control_flags")).fetchall()

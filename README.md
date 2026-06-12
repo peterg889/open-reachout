@@ -27,7 +27,12 @@ now compiles a Brief into a full program (personas, cohorts, generation
 prompts) with provenance and a Program Proposal containing sample emails —
 deterministic scaffold in fake mode, real synthesis with `--llm gemini`.
 The schemas are the enforcement layer: synthesis cannot exceed budgets,
-raise follow-up caps, or reference unregistered variable slots. The learning loop now runs end-to-end:
+raise follow-up caps, or reference unregistered variable slots. The discovery agent closes the loop: `reachout discover`
+mines per-cohort outcomes and files Proposals (shift budget from a
+losing cohort to a winning one, flag a zero-conversion cohort), which a
+human approves or declines via `reachout approve` — declines are
+remembered for 90 days, and approving a budget shift moves the live
+cohort caps. The learning loop now runs end-to-end:
 dispatches record bandit trials, interested replies record successes,
 bounces/complaints feed deterministic guardrail auto-pause, hostile or
 uncertain replies land in a real escalation queue (`reachout approve`),

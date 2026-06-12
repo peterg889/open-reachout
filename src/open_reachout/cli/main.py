@@ -358,33 +358,69 @@ def forget(ref: str) -> None:
 @app.command()
 def approve(
     resolve: str = typer.Option(None, help="escalation id to resolve"),
-    note: str = typer.Option("", help="resolution note (audited)"),
+    proposal: str = typer.Option(None, help="proposal id to approve"),
+    decline: str = typer.Option(None, help="proposal id to decline (remembered 90d)"),
+    note: str = typer.Option("", help="note (audited)"),
 ) -> None:
-    """Work the escalation queue (FR-4.6, RX-1): list open items or resolve one."""
-    from open_reachout.core import escalations
+    """Work the escalation queue and discovery proposals (FR-4.6/6.2, RX-1)."""
+    from open_reachout.core import escalations, proposals
     from open_reachout.core.db import engine_from_env
 
     actor = f"operator:{os.environ.get('USER', 'cli')}"
     with engine_from_env().begin() as conn:
         if resolve:
             ok = escalations.resolve(conn, resolve, actor=actor, note=note)
-            typer.secho(
-                f"resolved {resolve}" if ok else f"{resolve} is not an open escalation",
-                fg="green" if ok else "yellow",
-            )
+            typer.secho(f"resolved {resolve}" if ok else "not an open escalation",
+                        fg="green" if ok else "yellow")
             return
-        items = escalations.list_open(conn)
-    if not items:
-        typer.secho("escalation queue is empty", fg="green")
+        if proposal:
+            ok = proposals.approve(conn, proposal, actor=actor)
+            typer.secho(f"approved {proposal}" if ok else "not an open proposal",
+                        fg="green" if ok else "yellow")
+            return
+        if decline:
+            ok = proposals.decline(conn, decline, actor=actor, note=note)
+            typer.secho(f"declined {decline}" if ok else "not an open proposal",
+                        fg="green" if ok else "yellow")
+            return
+        escs = escalations.list_open(conn)
+        props = proposals.list_open(conn)
+
+    if not escs and not props:
+        typer.secho("nothing open: escalation queue and proposals are clear", fg="green")
         return
-    for item in items:
-        typer.echo(
-            f"{item.id}  [{item.subject_type}] {item.reason}\n"
-            f"    tenant={item.tenant} subject={item.subject_id} "
-            f"at={item.created_at:%Y-%m-%d %H:%M}\n"
-            f"    payload={item.payload}"
-        )
-    typer.echo(f"\n{len(items)} open. Resolve with: reachout approve --resolve <id>")
+    if escs:
+        typer.secho(f"\nEscalations ({len(escs)}):", fg="cyan")
+        for item in escs:
+            typer.echo(f"  {item.id} [{item.subject_type}] {item.reason}  ({item.tenant})")
+        typer.echo("  resolve: reachout approve --resolve <id>")
+    if props:
+        typer.secho(f"\nProposals ({len(props)}):", fg="cyan")
+        for p in props:
+            typer.echo(f"  {p.id} [{p.kind}] {p.summary}  ({p.tenant})")
+        typer.echo("  apply: reachout approve --proposal <id>  |  --decline <id>")
+
+
+@app.command()
+def discover(
+    config_dir: Path = typer.Argument(..., help="tenant dirs"),  # noqa: B008 — typer idiom
+) -> None:
+    """Run the discovery agent's outcome mining across tenants (FR-6.1)."""
+    from open_reachout.agents import discovery
+    from open_reachout.core.db import engine_from_env
+
+    tenants = sorted({load_tenant(f).tenant for f in config_dir.rglob("tenant.yaml")})
+    total = 0
+    with engine_from_env().begin() as conn:
+        for slug in tenants:
+            ids = discovery.analyze(conn, slug)
+            total += len(ids)
+            if ids:
+                typer.echo(f"{slug}: {len(ids)} proposal(s)")
+    typer.secho(
+        f"discovery: {total} proposal(s) recorded — review with `reachout approve`",
+        fg="green",
+    )
 
 
 @app.command()
