@@ -13,16 +13,16 @@
 
 **Open Reachout is the open-source framework for agentic outbound outreach** — the thing you reach for when your business depends on finding specific kinds of people on the open web and starting honest, compliant, personalized email conversations with them at a configured monthly volume.
 
-You declare **personas** in config. The framework:
+**The operator experience is deliberately hands-off.** You write a short **Brief** — *what kind of people to find, what kind of research to do on them, what goals to pursue and brainstorm toward* — plus your brand facts and budgets. The system synthesizes the full program from it (personas, cohorts, generation prompts, sequences, experiment plans), presents it for one approval, and then does the rest:
 
-1. **Discovers prospects** matching those personas via pluggable source adapters (public registries, Google Places, directories, agentic web search/scraping) — not B2B contact databases.
-2. **Enriches and qualifies** each prospect by reading their actual web presence into a cited, timestamped Evidence Card.
-3. **Composes and sends** personalized cold email with bounded drip follow-ups through your own sending-provider account.
+1. **Discovers prospects** matching the synthesized personas via pluggable source adapters (public registries, Google Places, directories, agentic web search/scraping) — not B2B contact databases.
+2. **Enriches and qualifies** each prospect by reading their actual web presence into a cited, timestamped Evidence Card, doing the kind of research the Brief asked for.
+3. **Composes and sends** personalized cold email (fully LLM-generated from prompts + variables) with bounded drip follow-ups through your own sending-provider account.
 4. **Handles replies agentically** — classifies intent, answers from your FAQ, sends links, calls your APIs, escalates to you when unsure.
-5. **Experiments honestly** — Thompson-sampling bandits over message variants with guardrail metrics, plus pooled attribute learning, instead of fake "AI optimization."
-6. **Proposes new cohorts** from outcome data on a research cadence — the closed loop nothing on the market closes.
+5. **Experiments honestly** — Thompson-sampling bandits over generated prompt variants with guardrail metrics, plus pooled attribute learning.
+6. **Proposes new cohorts, opportunities, and goals** from outcome data on a research cadence — the closed loop nothing on the market closes.
 
-Self-hosted, BYO API keys, compliance and safety guardrails in the core and non-bypassable.
+Steady state, the human touchpoints are: the weekly digest, the escalation queue, and approve/decline on proposals. Everything else is the system's job — governed by non-bypassable compliance and safety guardrails in the core.
 
 ### Why open source, and why now (research summary)
 
@@ -47,7 +47,7 @@ Self-hosted, BYO API keys, compliance and safety guardrails in the core and non-
 
 ### Goals
 
-- G1: **Config-first.** A complete outreach program — personas, cohorts, sequences, experiments, budgets, compliance identity — is declarative, versionable YAML. `reachout validate && reachout run` is the whole interface.
+- G1: **Brief-first, config underneath.** The operator authors a short Brief (audience, research directives, goals, brand facts, budgets); the system compiles it into the complete declarative program — personas, cohorts, prompts, sequences, experiments — as versionable YAML the operator can inspect, edit, or ignore. `reachout init && reachout approve && reachout run` is the whole interface; hand-written config remains a fully supported escape hatch (progressive disclosure, FR-0.4).
 - G2: **Pluggable everything at the edges.** Source adapters, enrichers, email finders, verifiers, sending providers, LLM backends, and reply actions are interfaces with entry-point plugin registration. Core pipeline logic stays in the framework.
 - G3: **Compliance and deliverability by construction.** The framework refuses to send non-compliant mail, over-budget mail, over-frequency mail, or mail to suppressed/unverified addresses — regardless of what configs or plugins ask for.
 - G4: **Honest statistics built-in.** Bandit allocation, guardrail pausing, and pooled attribute learning ship in the core with sane defaults.
@@ -168,10 +168,44 @@ class ExperimentPolicy(Protocol):
 
 ## 7. Functional Requirements
 
+### 7.0 Brief & program synthesis (the hands-off layer)
+
+- FR-0.1 **[P0]**: **The Brief is the primary authored artifact.** One short document per tenant, validated like any config:
+  ```yaml
+  brief:
+    find: >          # what kind of users to find (plain language)
+      Small venues — cafes, breweries, wineries, bars — within 50 miles of
+      Austin that host or could host live music, and working bands that
+      play rooms like that.
+    research: >      # what kind of research to do
+      Read their website and event calendar; figure out whether they already
+      book live music, how often, what genres, and who books it. For bands:
+      where they've played recently, genre, draw signals.
+    goals:           # what to pursue, and what to brainstorm toward
+      convert: venue or band creates a profile        # conversion definition
+      brainstorm: adjacent segments, seasonal opportunities, new value-prop
+                  angles, partnership ideas
+    about_us:        # brand facts — the ONLY permitted source of product claims (FR-3.2)
+      name: StageMatch
+      what_we_do: free venue accounts; band membership $9/mo; booking workflow
+      links: { signup: …, calendar: …, ethics: … }
+      identity: { sender: "Maya Reyes, StageMatch", physical_address: …, disclose_automation: true }
+    budgets: { monthly_prospects: 500, monthly_llm_usd: 100 }
+    autonomy: hands_off            # see FR-0.3
+  ```
+- FR-0.2 **[P0]**: **Program synthesis.** From the Brief, a synthesis agent generates the full program — personas with qualification signals, initial cohorts (with size estimates from live source probes), variant generation prompts, sequence shapes, experiment plans, and source-adapter selections — and presents it as a single reviewable **Program Proposal** (with a sample of 25 dry-run emails attached, because operators judge programs by reading emails, not YAML). One approval launches it. Synthesis is constrained by construction: product claims only from `about_us` (seeding the claims registry), volumes only within `budgets`, all framework defaults (≤3 follow-ups, frequency caps, send windows) inherited and not synthesizable away.
+- FR-0.3 **[P0]**: **Autonomy presets** bundle the per-capability knobs (G5):
+  - `review_everything` — every cohort, prompt, and reply action proposes first (onboarding/regulated tenants).
+  - `standard` (default) — replies and prompt-level variants auto within guardrails; new cohorts and value-prop changes propose.
+  - `hands_off` — the Brief's promise: everything autonomous within budgets and guardrails, including launching agent-discovered cohorts of existing personas (`auto_launch_within_budget`) and adopting winning prompts. Still **always** human: new personas, value-prop-level claim changes, spend-cap increases, resume-after-halt, and escalated replies. Steady-state touchpoints: weekly digest + escalation queue.
+- FR-0.4 **[P0]**: **Progressive disclosure.** Synthesized artifacts are ordinary config files committed with `generated_by` provenance — inspectable, diffable, hand-editable; an operator edit pins that artifact against future re-synthesis (no silent overwrites). Brief-only operators never need to read them; power operators can author everything manually. There is one config system, not two.
+- FR-0.5 **[P1]**: **Goal brainstorming.** The discovery agent's research cadence (FR-6.1) also works the Brief's `brainstorm` directives: it proposes not just new cohorts but new *objectives* — value-prop angles to test, adjacent audiences, seasonal pushes, partnership/channel ideas — each as a Proposal with evidence and a ready-to-launch program delta. Declined directions are remembered.
+- FR-0.6 **[P1]**: **Re-synthesis on drift.** When outcomes diverge from the program's assumptions (cohort underperforming its synthesis estimate, objection themes contradicting the chosen value props), the synthesis agent proposes a program revision rather than waiting for the operator to notice.
+
 ### 7.1 Config & CLI
 
 - FR-1.1 **[P0]**: One YAML tree per deployment, pydantic-validated, atomic apply; `reachout validate` catches everything statically catchable.
-- FR-1.2 **[P0]**: `reachout init` scaffolds a tenant (incl. copying an example); `reachout dry-run --cohort X --n 100` runs the pipeline through compose, writing would-send messages to a review file; `reachout approve` works the Proposal/escalation queue; `reachout report` prints the digest.
+- FR-1.2 **[P0]**: `reachout init` is a Brief interview (or `--from-brief brief.yaml`) that runs program synthesis (FR-0.2) and ends at a Program Proposal with sample emails — target: **under 30 minutes of operator time from empty directory to approvable program**; `reachout dry-run --cohort X --n 100` runs the pipeline through compose, writing would-send messages to a review file; `reachout approve` works the Proposal/escalation queue; `reachout report` prints the digest.
 - FR-1.3 **[P0]**: **`reachout halt [--tenant]`** stops all sending immediately (in-flight jobs drain without dispatching). Halt state persists until explicit `reachout resume` by a human. **Nothing — no agent, no config reload, no schedule — can override a halt.** (Release-gated, §10.)
 - FR-1.4 **[P0]**: **`reachout forget <email|entity-id>`** executes a data-subject deletion in one call: suppress permanently (tombstone hash only), delete prospect/entity PII, evidence cards, and thread contents; emit an audit receipt. Propagates to the sending provider's lists via API. (Release-gated, §10.)
 - FR-1.5 **[P0]**: Secrets via env vars only; `reachout doctor` checks provider connectivity/quotas, DNS (SPF/DKIM/DMARC), warmup status, webhook signature config, and key scoping (§8.7).
@@ -238,7 +272,7 @@ class ExperimentPolicy(Protocol):
 ### 7.6 Cohort discovery agent
 
 - FR-6.1 **[P0]**: On a research cadence with a hard monthly budget, mines outcomes + bounded web research → **Proposals** (new cohorts with evidence links/size/cost, budget shifts, value-prop deltas, opportunity flags). Declines remembered 90 days.
-- FR-6.2 **[P0]**: Autonomy: `off | propose (default) | auto_launch_within_budget` (auto mode only for existing personas inside a budget envelope).
+- FR-6.2 **[P0]**: Autonomy: `off | propose (default) | auto_launch_within_budget` (auto mode only for existing personas inside a budget envelope). The `hands_off` preset (FR-0.3) sets auto mode; even there, new *personas* and value-prop-level changes always propose.
 - FR-6.3 **[P2]**: Lookalike prospecting: seed from converted entities → shared-attribute mining → proposed lookalike cohorts. (Commercial tools do a shallow version of this; ours can condition on actual conversion data.)
 - FR-6.4 **[P2]**: Seasonality planning: discovery agent learns per-cohort seasonal response curves (wedding season, patio season, January therapy demand) and proposes calendar-aware budget allocation.
 
@@ -333,7 +367,7 @@ These gates double as the answer to a prospective adopter's vendor-evaluation ch
 - Deliverability: complaint <0.1%, bounce <2% (and <5% within every "verified" confidence bucket — FR-2.6).
 - Reply ≥6% by month 3; positive-reply ≥2.5%; reply→conversion ≥30% — now measured on attributed conversions (FR-8.3), not proxies.
 - Unsubscribe-to-suppression latency p95 <10 min in production.
-- Operator time <4 hrs/week/tenant; review-queue p95 age <48h (RX-2).
+- Operator time: <30 min from Brief to approvable program (FR-1.2); steady-state **<2 hrs/week/tenant in `hands_off`** (<4 in `standard`); review-queue p95 age <48h (RX-2).
 - ≥1 bandit-adopted variant improvement and ≥2 discovery proposals (≥25% accepted) per month per tenant; objection report actively cited in a value-prop change within 90 days (proof the objection loop is market research, not a graveyard).
 - Business targets (90 days from first send): A — 100 claimed listings across 2 states; B — 30 venues + 60 bands in one metro, ≥10 booking requests.
 
@@ -352,8 +386,8 @@ Explicitly parked, recorded so they shape interfaces but not the schedule:
 - **M1 — Pipeline to dry-run (wk 3–5):** NPPES + Google Places + web_research adapters, **BYO list import (FR-2.10)**, Firecrawl enrichment with timestamped Evidence Cards + staleness, email waterfall + calibrated verification, qualifier, composer + validators incl. claims lint and sender-identity/disclosure rules, `reachout dry-run`. **Injection corpus v0 wired into CI.** Exit: 100 would-send emails reviewed per example; gates 1, 9, 10, 11 passing.
 - **M2 — Live sends (wk 6–8):** Smartlead adapter (signed webhooks), budget/spend gates, sequencing, reply classifier + escalation + `interested`/`unsubscribe` actions, attribution tokens + conversion webhook. Exit: 300 prospects contacted across both examples; **all five disqualifying gates passing in staging**; kill switches + halt fired in test.
 - **M3 — Learning loop (wk 9–11):** Thompson allocation, guardrail pausing, pooled attribute model v0, objection taxonomy v0, digest + report + dashboard/review queue (RX-1), OTel. Exit: first bandit-driven variant promotion with documented posterior.
-- **M4 — Discovery + 0.1 release (wk 12–14):** discovery agent (`propose`), Proposals/approve flow, source-quality throttling, correction feedback loop v0, docs site incl. ethics statement, PyPI `0.1.0`, public repo. Exit: first agent-discovered cohort live; quickstart tested on an outsider; full gate suite green.
-- **Post-0.1 (priority order):** **operator event API + event-triggered campaigns (FR-2.9 — first item; it's customer A's compounding use case)**, human-task sequence steps, versioned claim allowlist, sentiment auto-throttle, referral flow (incl. on-behalf-of), follow-up value lint, hallucination monitor, no-show handling, signal adapters (liquor licenses), Instantly adapter, `auto_launch_within_budget`, remaining reply intents, regime plugins, 1.0 interface freeze. Backlog items (§12) as contributor bandwidth allows.
+- **M4 — Synthesis, discovery + 0.1 release (wk 12–14):** **Brief schema + program synthesis (FR-0.1/0.2) with Program Proposal flow** (both examples regenerated from Briefs as the acceptance test), autonomy presets (FR-0.3), discovery agent (`propose`), Proposals/approve flow, source-quality throttling, correction feedback loop v0, docs site incl. ethics statement, PyPI `0.1.0`, public repo. Exit: first agent-discovered cohort live; an outsider goes Brief → approvable program in <30 min; full gate suite green. *(M1–M3 are built brief-less against hand-written example configs — synthesis lands last because it generates the artifacts the earlier milestones prove out.)*
+- **Post-0.1 (priority order):** **operator event API + event-triggered campaigns (FR-2.9 — first item; it's customer A's compounding use case)**, goal brainstorming + re-synthesis on drift (FR-0.5/0.6 — completes the hands-off promise), human-task sequence steps, versioned claim allowlist, sentiment auto-throttle, referral flow (incl. on-behalf-of), follow-up value lint, hallucination monitor, no-show handling, signal adapters (liquor licenses), Instantly adapter, `auto_launch_within_budget`, remaining reply intents, regime plugins, 1.0 interface freeze. Backlog items (§12) as contributor bandwidth allows.
 
 ## 14. Risks & Mitigations
 

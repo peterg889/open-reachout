@@ -368,13 +368,24 @@ Every terminal observation (reply classified, positive/negative, conversion attr
 ### 8.7 Expand (discovery agent)
 Weekly scheduler job, hard-capped by `monthly_research_budget` (spend reservation up front): outcome analysis SQL + bounded `web_research` calls → `proposals` rows with evidence URLs, size/cost estimates → reviewer queue/digest. `auto_launch_within_budget` (P1) reuses the same proposal objects with an auto-approval policy gate — no separate path.
 
-### 8.8 Conversions & attribution
+### 8.8 Program synthesis (PRD FR-0.x — the hands-off layer)
+The Brief is config (`brief.yaml`, pydantic-validated, content-hashed into `config_versions` like everything else). Synthesis is a **compiler with an LLM front-end**, not a freeform agent:
+
+1. `reachout init` (interview or `--from-brief`) runs `SYNTHESIZE_PROGRAM`: Brief → candidate personas/cohorts/variant prompts/sequence shapes/experiment plans, emitted as **ordinary config artifacts** with `generated_by: synthesis@<hash>` provenance — the same pydantic schemas hand-written config uses. There is no second config system; synthesis output that fails `reachout validate` fails synthesis (retry-with-errors ×2, then partial program + flagged gaps).
+2. **Structural constraints the synthesizer cannot exceed** (enforced by the schemas + validators, not the prompt): product claims only from `about_us` (which seeds the claim registry); volumes/spend within `budgets`; follow-up caps, frequency caps, send windows inherited from core constants; variant prompts may only reference registered variables (FR-3.1a); source adapters chosen from the registered + non-denylisted set.
+3. **Live source probes:** synthesis runs cheap, spend-metered probe queries against chosen source adapters (e.g., NPPES taxonomy counts, a Places page) so cohort size estimates in the Program Proposal are measured, not hallucinated.
+4. Output = one **Program Proposal** row (a `proposals` record of kind `program`) bundling the artifact set + a 25-email dry-run sample (FakeProvider path). `reachout approve` applies the artifacts atomically as a config version and schedules launch (warmup-aware).
+5. **Edit-pinning (FR-0.4):** each generated artifact carries `generated_hash`; if the operator hand-edits a file (hash mismatch at load), it's marked `pinned` and excluded from future re-synthesis/revision proposals — no silent overwrites. `reachout program diff` shows generated-vs-pinned drift.
+6. **Re-synthesis on drift (FR-0.6, P1)** reuses the same machinery: a scheduler job compares cohort performance against the synthesis estimates stored with the program; divergence past thresholds triggers `SYNTHESIZE_PROGRAM` in *revision mode* (existing program + outcome summary + objection themes as input) emitting a delta Program Proposal.
+7. **Autonomy presets (FR-0.3)** are config sugar expanded at load into the per-capability knobs; the expansion table is a code constant, and the always-human set (new personas, value-prop claim changes, spend-cap raises, halt resume, escalations) is hard-coded — a preset cannot grant them.
+
+### 8.9 Conversions & attribution
 Outbound URLs embed `t=<base32(touch_id)>.<hmac_sha256(tenant_attr_key, touch_id)[:10]>`. `/v1/conversions` (and the Python API) verifies the MAC, marks the prospect `converted`, attributes through touch → variant → cohort, feeds `variant_stats.conversions`. Invalid MACs are logged and rejected (no unauthenticated state changes).
 
 ## 9. LLM Subsystem
 
 ### 9.1 Task registry
-Closed enum of tasks: `EXTRACT_FACTS, QUALIFY, COMPOSE, GROUNDEDNESS_AUDIT, CLASSIFY_REPLY, OBJECTION_TAG, DISCOVERY_RESEARCH, VARIANT_GENERATE, WINLOSS_SYNTH(P2)`. Each task: pinned prompt (versioned file `prompts/<task>/<semver>.md`, hash recorded in traces), model tier, max tokens, output schema, spend category.
+Closed enum of tasks: `EXTRACT_FACTS, QUALIFY, COMPOSE, GROUNDEDNESS_AUDIT, CLASSIFY_REPLY, OBJECTION_TAG, DISCOVERY_RESEARCH, VARIANT_GENERATE, SYNTHESIZE_PROGRAM, BRAINSTORM_GOALS(P1), WINLOSS_SYNTH(P2)`. (`SYNTHESIZE_PROGRAM` and `DISCOVERY_RESEARCH`/`BRAINSTORM_GOALS` run on the high-reasoning model tier; they're low-frequency.) Each task: pinned prompt (versioned file `prompts/<task>/<semver>.md`, hash recorded in traces), model tier, max tokens, output schema, spend category.
 
 ### 9.2 Structured output, closed schemas
 Every task's output is parsed into a pydantic model with `extra='forbid'`. Failed parses retry once with the validation error appended, then fail the job (→ retry/DLQ). Agents never emit free-form actions: `CLASSIFY_REPLY` returns `{intent: Enum, confidence: float, action: Enum-of-allowlist, action_args: TypedDict}` — an action outside the tenant's registered allowlist fails schema validation before any side effect exists (I-5).
@@ -544,8 +555,10 @@ core/        models, lifecycle, gatekeeper, budget, frequency, suppression,
              compliance/, queue, config, service layer
 security/    envelope, redaction, webhook signing, token auth
 stats/       bandit, attribute_model, sentiment, calibration
-agents/      qualifier, composer, reply_handler, discovery   (pure: LLM tasks in,
-             validated structures out; NO side effects, NO provider imports)
+agents/      qualifier, composer, reply_handler, discovery, synthesizer
+             (pure: LLM tasks in, validated structures out; NO side effects,
+              NO provider imports — the synthesizer emits config artifacts,
+              core.service applies them)
 adapters/    sources/ enrich/ verify/ sending/ llm/          (side-effectful edges)
 cli/  api/  dashboard/                                        (shells over core.service)
 ```
