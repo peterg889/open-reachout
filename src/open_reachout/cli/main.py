@@ -52,7 +52,7 @@ def validate(
 
 @app.command()
 def doctor() -> None:
-    """Environment checks (FR-1.5). M0: secrets hygiene + DSN presence."""
+    """Environment + DNS deliverability checks (FR-1.5)."""
     problems: list[str] = []
     if not os.environ.get("OR_DATABASE_DSN"):
         problems.append("OR_DATABASE_DSN is not set")
@@ -60,11 +60,39 @@ def doctor() -> None:
         value = os.environ.get(var, "")
         if value and len(value) < 16:
             problems.append(f"{var} looks too short to be a real credential")
+
+    # Own-domain sending: verify the Google/Microsoft bulk-sender DNS floor
+    # (SPF, DMARC, DKIM, MX) for every configured SMTP sending domain.
+    smtp_raw = os.environ.get("OR_SMTP_MAILBOXES", "")
+    if smtp_raw:
+        try:
+            from open_reachout.core.dnscheck import Severity, check_domain, live_lookups
+            from open_reachout.core.message import domain_of
+
+            lookup_txt, has_mx = live_lookups()
+            import json as _json
+
+            domains = sorted({domain_of(addr) for addr in _json.loads(smtp_raw)})
+            for domain in domains:
+                for finding in check_domain(domain, lookup_txt, has_mx):
+                    line = f"{domain} {finding.check}: {finding.detail}"
+                    if finding.severity is Severity.FAIL:
+                        problems.append(line)
+                    elif finding.severity is Severity.WARN:
+                        typer.secho(f"warn: {line}", fg="yellow")
+                    else:
+                        typer.echo(f"ok   {line}")
+        except ImportError:
+            typer.secho(
+                "warn: dnspython not installed — pip install 'open-reachout[dns]' "
+                "to verify SPF/DKIM/DMARC before sending from your own domain",
+                fg="yellow",
+            )
     if problems:
         for p in problems:
-            typer.secho(f"warn: {p}", fg="yellow")
+            typer.secho(f"FAIL: {p}", fg="red")
         raise typer.Exit(1)
-    typer.secho("doctor: ok (M0 checks only — DNS/provider checks land in M1)", fg="green")
+    typer.secho("doctor: ok", fg="green")
 
 
 def _not_yet(milestone: str) -> None:
@@ -431,6 +459,35 @@ def report() -> None:
 
     with engine_from_env().begin() as conn:
         typer.echo(build_report(conn))
+
+
+@app.command()
+def poll(
+    once: bool = typer.Option(False, "--once", help="poll once and exit (cron-friendly)"),
+    interval: int = typer.Option(120, help="seconds between polls"),
+) -> None:
+    """Poll own-domain inboxes over IMAP for replies/bounces (spec 8.5).
+
+    Requires OR_IMAP_MAILBOXES (JSON). Parsed mail feeds the same event
+    pipeline as provider webhooks; run `reachout run` to process the
+    resulting classify jobs.
+    """
+    import time as _time
+
+    from open_reachout.adapters.sending.imap_poll import mailboxes_from_env, poll_once
+    from open_reachout.core.db import engine_from_env
+
+    mailboxes = mailboxes_from_env()
+    if not mailboxes:
+        typer.secho("set OR_IMAP_MAILBOXES (JSON) to poll your own inboxes", fg="red")
+        raise typer.Exit(2)
+    engine = engine_from_env()
+    while True:
+        processed = poll_once(engine, mailboxes)
+        typer.echo(f"poll: {processed} new event(s) from {len(mailboxes)} inbox(es)")
+        if once:
+            return
+        _time.sleep(interval)  # pragma: no cover - loop mode
 
 
 @app.command()

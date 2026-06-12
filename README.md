@@ -19,8 +19,11 @@ your domain and reputation, with From, Message-ID, and one-click unsubscribe
 all on your domain. Because the framework drives each send itself, every gate
 (suppression, halt, frequency, budget) is enforced in the same transaction as
 the SMTP socket — no reactive-pause gap. Inbound replies and bounces correlate
-back by Message-ID via IMAP polling. (Managed providers like Smartlead remain
-an option for bundled warmup/rotation.)
+back by Message-ID via IMAP polling — `reachout poll` fetches your
+inboxes and feeds the same event pipeline as provider webhooks, and
+`reachout doctor` verifies your domain's SPF/DMARC/DKIM/MX against the
+Google/Microsoft bulk-sender floor before you send. (Managed providers
+like Smartlead remain an option for bundled warmup/rotation.)
 
 **M0–M4 core complete.** `reachout init --from-brief brief.yaml --tenant x`
 now compiles a Brief into a full program (personas, cohorts, generation
