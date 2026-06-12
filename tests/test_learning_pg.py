@@ -180,3 +180,29 @@ def test_objection_replies_land_in_taxonomy_store(
 
         digest = build_report(c)
         assert "price x1" in digest  # objection trend reaches the digest (FR-8.1)
+
+
+def test_interested_reply_enqueues_referral_job(
+    pg_engine: Engine, conn, seed: Seed  # noqa: ANN001
+) -> None:
+    """FR-4.4: an explicitly interested reply is a positive event — the
+    referral hook fires (eligibility is re-checked in the handler)."""
+    reply_id = conn.execute(
+        text("""INSERT INTO replies (prospect_id, body) VALUES
+               (CAST(:p AS uuid), 'This looks great, sign me up!') RETURNING id"""),
+        {"p": seed.prospect_id},
+    ).scalar()
+    conn.commit()
+    from open_reachout.core.queue import enqueue
+
+    with pg_engine.begin() as c:
+        enqueue(c, "classify", {"reply_id": str(reply_id)},
+                idempotency_key=f"classify:{reply_id}")
+    make_worker(pg_engine, FakeSendingProvider(), StubLLM("interested")).drain()
+    with pg_engine.begin() as c:
+        n = c.execute(
+            text("""SELECT count(*) FROM jobs WHERE queue = 'referral'
+                    AND payload->>'prospect_id' = :p"""),
+            {"p": seed.prospect_id},
+        ).scalar()
+        assert n == 1

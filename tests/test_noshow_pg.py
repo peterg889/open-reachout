@@ -125,3 +125,38 @@ def test_reengage_with_prompt_drafts_one_touch(pg_engine, conn, seed: Seed) -> N
         ).fetchone()
         assert kind == "agentic_reply"
         assert campaign == "small_venue:reengage"
+
+
+def test_no_show_operator_event_routes_through_trigger(
+    pg_engine, conn, seed: Seed  # noqa: ANN001
+) -> None:
+    """FR-4.5 via FR-2.9: booking.no_show events resolve by entity_email."""
+    import json
+
+    from open_reachout.core import prospecting
+    from open_reachout.core.queue import enqueue
+
+    _engaged(conn, seed)
+    runtimes = _runtimes(conn, with_prompt=False)
+    event_id = conn.execute(
+        text("""INSERT INTO operator_events (event_type, selector)
+                VALUES ('booking.no_show', CAST(:s AS jsonb)) RETURNING id"""),
+        {"s": json.dumps({"entity_email": seed.email})},
+    ).scalar()
+    enqueue(conn, "trigger", {"event_id": str(event_id)},
+            idempotency_key=f"trigger:{event_id}")
+    conn.commit()
+    Worker(pg_engine, handlers={
+        "trigger": prospecting.make_trigger_handler(runtimes),
+    }).drain()
+    with pg_engine.begin() as c:
+        n = c.execute(
+            text("""SELECT count(*) FROM audit_events
+                    WHERE subject_id = :p AND event = 'no_show'"""),
+            {"p": seed.prospect_id},
+        ).scalar()
+        assert n == 1
+        reengage = c.execute(
+            text("SELECT count(*) FROM jobs WHERE queue = 'reengage'")
+        ).scalar()
+        assert reengage == 1

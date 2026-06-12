@@ -133,3 +133,44 @@ def test_new_campaign_onboarding_flow(pg_engine, conn, seed, monkeypatch) -> Non
     with pg_engine.begin() as c:
         n = c.execute(text("SELECT count(*) FROM jobs WHERE queue='synthesize'")).scalar()
         assert n == 1
+
+
+def test_task_and_ramp_and_control_routes(pg_engine, conn, seed, monkeypatch) -> None:  # noqa: ANN001
+    """Round out the management surface: task done/skip, ramp reject,
+    tenant pause/resume — all through the service layer with audit."""
+    from open_reachout.core import human_tasks, sendpath
+    from open_reachout.core.compliance.validators import Draft
+
+    task = human_tasks.create_for_step(
+        conn, tenant=seed.tenant, prospect_id=seed.prospect_id,
+        campaign_id="c", step_index=0,
+        instruction="Walk in Thursday and ask for the booking manager",
+        value_prop="free curated local acts",
+    )
+    held = sendpath.queue_draft(
+        conn, prospect_id=seed.prospect_id, campaign_id="c2", variant_id="v",
+        step_index=0, kind="cold", draft=Draft(subject="s", body="b"),
+        content_hash="h2", approve_first=1,
+    )
+    conn.commit()
+    api = _client(pg_engine, monkeypatch, manage_token="m" * 24)
+    q = "?manage_token=" + "m" * 24
+
+    assert api.post(f"/dashboard/touches/{held}/reject{q}",
+                    follow_redirects=False).status_code == 303
+    assert api.post(f"/dashboard/tasks/{task}/done{q}",
+                    follow_redirects=False).status_code == 303
+    assert api.post(f"/dashboard/tasks/{task}/skip{q}",
+                    follow_redirects=False).status_code == 404  # already resolved
+    assert api.post(f"/dashboard/tenants/{seed.tenant}/pause{q}",
+                    follow_redirects=False).status_code == 303
+    with pg_engine.begin() as c:
+        halted = c.execute(text("SELECT count(*) FROM control_flags WHERE scope = :s"),
+                           {"s": seed.tenant}).scalar()
+        assert halted == 1
+    assert api.post(f"/dashboard/tenants/{seed.tenant}/resume{q}",
+                    follow_redirects=False).status_code == 303
+    with pg_engine.begin() as c:
+        halted = c.execute(text("SELECT count(*) FROM control_flags WHERE scope = :s"),
+                           {"s": seed.tenant}).scalar()
+        assert halted == 0

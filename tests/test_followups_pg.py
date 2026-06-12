@@ -157,3 +157,87 @@ class _SeedShim:
         self.email = seed.email
 
     new_drafted_touch = Seed.new_drafted_touch
+
+
+def test_compose_handler_selects_followup_surface(pg_engine, conn, seed: Seed) -> None:  # noqa: ANN001
+    """FR-3.9: a step>0 compose job draws from followup-surface variants and
+    queues kind='followup'; the opener surface is never resent."""
+    from open_reachout.core import dryrun, prospecting
+    from open_reachout.core.queue import enqueue
+    from open_reachout.core.worker import Worker
+
+    cfg = load_tenant(EXAMPLES / "music-marketplace" / "tenant.yaml")
+    conn.execute(
+        text("""UPDATE prospects SET persona_id = 'small_venue', state = 'contacted'
+                WHERE id = CAST(:p AS uuid)"""),
+        {"p": seed.prospect_id},
+    )
+    conn.execute(
+        text("""INSERT INTO evidence_facts (id, prospect_id, fact_type, content,
+                source_url, observed_at)
+            VALUES (gen_random_uuid(), CAST(:p AS uuid), 'event_series',
+                CAST('{"summary": "Friday open mic"}' AS jsonb),
+                'https://venue.test/e', now())"""),
+        {"p": seed.prospect_id},
+    )
+    runtime = prospecting.runtime_for(conn, cfg)
+    enqueue(conn, "compose", {"prospect_id": seed.prospect_id, "step_index": 1},
+            idempotency_key=f"fu-test:{seed.prospect_id}")
+    conn.commit()
+    runtimes = {cfg.tenant: runtime}
+    llm = dryrun.ScriptedLLM(runtime.validator_ctx,
+                             cfg.brief.about_us.identity.sender)
+    Worker(pg_engine, handlers={
+        "compose": prospecting.make_compose_handler(runtimes, llm),
+    }).drain()
+    with pg_engine.begin() as c:
+        kind, step, variant, campaign = c.execute(
+            text("""SELECT kind, step_index, variant_id, campaign_id FROM touches
+                    WHERE prospect_id = CAST(:p AS uuid)
+                      AND id != CAST(:seed AS uuid)"""),
+            {"p": seed.prospect_id, "seed": seed.touch_id},
+        ).fetchone()
+        assert kind == "followup" and step == 1
+        assert variant == "followup_new_angle"          # the followup surface
+        assert campaign.endswith("followup_strategy")
+
+
+def test_compose_handler_releases_when_no_followup_variants(
+    pg_engine, conn, seed: Seed  # noqa: ANN001
+) -> None:
+    from open_reachout.core import dryrun, prospecting
+    from open_reachout.core.config import TenantConfig
+    from open_reachout.core.queue import enqueue
+    from open_reachout.core.worker import Worker
+
+    raw = load_tenant(EXAMPLES / "music-marketplace" / "tenant.yaml").model_dump()
+    raw["personas"][0]["variants"] = [
+        v for v in raw["personas"][0]["variants"]
+        if not v["surface"].startswith("followup")
+    ]
+    cfg = TenantConfig.model_validate(raw)
+    conn.execute(
+        text("""UPDATE prospects SET persona_id = 'small_venue', state = 'contacted'
+                WHERE id = CAST(:p AS uuid)"""),
+        {"p": seed.prospect_id},
+    )
+    conn.execute(  # an active sequence that should be released
+        text("""UPDATE entities SET active_sequence_touch_id = CAST(:t AS uuid)
+                WHERE id = CAST(:e AS uuid)"""),
+        {"t": seed.touch_id, "e": seed.entity_id},
+    )
+    runtime = prospecting.runtime_for(conn, cfg)
+    enqueue(conn, "compose", {"prospect_id": seed.prospect_id, "step_index": 1},
+            idempotency_key=f"fu-none:{seed.prospect_id}")
+    conn.commit()
+    llm = dryrun.ScriptedLLM(runtime.validator_ctx,
+                             cfg.brief.about_us.identity.sender)
+    Worker(pg_engine, handlers={
+        "compose": prospecting.make_compose_handler({cfg.tenant: runtime}, llm),
+    }).drain()
+    with pg_engine.begin() as c:
+        active = c.execute(
+            text("SELECT active_sequence_touch_id FROM entities WHERE id = CAST(:e AS uuid)"),
+            {"e": seed.entity_id},
+        ).scalar()
+        assert active is None  # drip ended cleanly; entity unlocked

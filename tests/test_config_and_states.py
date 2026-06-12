@@ -83,3 +83,21 @@ def test_illegal_shortcuts_rejected() -> None:
         assert_transition(ProspectState.DISCOVERED, ProspectState.CONTACTED)
     with pytest.raises(TransitionError):
         assert_transition(ProspectState.CONVERTED, ProspectState.QUEUED)
+
+
+def test_apply_schema_is_idempotent(conn) -> None:  # noqa: ANN001
+    """Upgrades re-apply schema.sql on live databases: running it twice must
+    be safe and must not disturb existing rows (spec §17 expand-contract)."""
+    import pytest
+
+    pytest.importorskip("psycopg")
+    from sqlalchemy import text
+
+    from open_reachout.core.db import apply_schema
+
+    conn.execute(text("INSERT INTO tenants (slug) VALUES ('idem-check')"))
+    apply_schema(conn)  # second application over a populated database
+    survived = conn.execute(
+        text("SELECT count(*) FROM tenants WHERE slug = 'idem-check'")
+    ).scalar()
+    assert survived == 1
