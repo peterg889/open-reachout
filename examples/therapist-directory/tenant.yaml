@@ -1,0 +1,68 @@
+# Reference use case: therapist directory (PRD Appendix A).
+# CareDash rule: registry data feeds private outreach only - never public
+# profile pre-population. disclose_automation stays on for this audience.
+tenant: theradirectory
+
+brief:
+  find: >
+    US licensed therapists and psychologists in solo or 2-3 person private
+    practice with their own website, starting with LMFTs and LPCs in Texas
+    and Georgia, who likely depend on directories for client flow.
+  research: >
+    Read their practice website: specialties, modalities, whether they list
+    self-pay rates, whether they mention accepting new clients, and which
+    directories they appear on. Never scrape Psychology Today.
+  goals:
+    convert: therapist claims their free listing
+    brainstorm: adjacent license types, states with compact-licensure events
+  about_us:
+    name: TheraDirectory
+    what_we_do: >
+      A therapist directory that is free until your first client inquiry,
+      lists individual practitioners only - no platform bulk profiles - and
+      shows exactly where your profile traffic comes from.
+    links:
+      signup: https://theradirectory.test/claim
+      ethics: https://theradirectory.test/how-we-found-you
+    identity:
+      sender: "Sam Whitfield, TheraDirectory"
+      physical_address: "1112 Manufacturing St Ste 200, Dallas TX 75207"
+      disclose_automation: true
+  budgets:
+    monthly_prospects: 600
+    monthly_llm_usd: 120
+  autonomy: review_everything   # trust-first onboarding; loosen later
+
+personas:
+  - id: solo_therapist
+    description: >
+      Licensed therapist or psychologist in solo or very small private
+      practice, own website, likely dissatisfied with directory referral
+      volume and sensitive to spam.
+    evidence_signals: [has_own_website, solo_practice, lists_specialties]
+    value_prop: a free-until-first-client listing, individual practitioners only
+    voice: { tone: respectful_plain, register: clinician }
+    sequence:
+      steps: 3
+      gaps_days: [5, 8]
+    priority: 10
+    cohorts:
+      - id: tx_lmft_2026q3
+        filters: { state: TX, taxonomy: ["106H00000X"] }
+        monthly_budget: 300
+        sources: [nppes, state_boards]
+      - id: ga_lpc_2026q3
+        filters: { state: GA, taxonomy: ["101YP2500X"] }
+        monthly_budget: 300
+        sources: [nppes, state_boards]
+    variants:
+      - id: opener_provenance_first
+        surface: opener_strategy
+        attributes: { tone: respectful, hook: provenance_transparency, cta: claim_link }
+        prompt: |
+          Write a first-touch email to {{prospect.first_name}}, a therapist in
+          private practice. State plainly how we found them (public NPI
+          registry and {{evidence.practice_site}}) before anything else.
+          Reference {{evidence.specialty}} accurately - no flattery, no
+          implied relationship. One sentence on {{persona.value_prop}},
+          then the claim link {{tenant.links.signup}}. {{persona.voice_rules}}

@@ -12,7 +12,21 @@ Self-hosted. BYO API keys. Compliance guardrails (CAN-SPAM, volume caps, suppres
 
 ## Status
 
-Pre-code. Currently in research/specification phase.
+**M0 (skeleton) in progress.** The pure-logic core is implemented and tested:
+email canonicalization, the prospect state machine, Brief/program config
+schemas with core-constant caps, the typed variable registry with
+trust-classed interpolation, deterministic compliance validators, the
+untrusted-content envelope, the gatekeeper claim orchestration (ordering,
+fail-closed, construction privilege), the Postgres job-queue SQL, the initial
+DB schema with belt-and-braces triggers, FakeProviders, and a CLI whose
+`validate`/`doctor` work today. The first 7 acceptance-gate tests (PRD §10)
+run in CI.
+
+```bash
+uv venv && uv pip install -e ".[dev]"
+uv run pytest && uv run pytest -m gates
+reachout validate examples
+```
 
 | Doc | Contents |
 |---|---|

@@ -80,7 +80,7 @@ Three containers (`api`, `worker`, `postgres`); `api` is stateless and `worker` 
 
 | # | Decision | Choice | Alternatives rejected & why |
 |---|---|---|---|
-| D-1 | Language | Python 3.12+, fully typed (mypy --strict on `core/`) | TS (smaller AI-contributor pool); Go (slower iteration on LLM-heavy code) |
+| D-1 | Language | Python 3.11+, fully typed (mypy --strict on `core/`) | TS (smaller AI-contributor pool); Go (slower iteration on LLM-heavy code) |
 | D-2 | State | Postgres 16, single instance + pgvector | SQLite (no SKIP LOCKED concurrency, weaker online backup); MySQL (no transactional advisory locks idiom we use) |
 | D-3 | Queue | Postgres table + `FOR UPDATE SKIP LOCKED` leases (own ~300-line module, §6) | Celery/Redis (extra stateful infra violates O-3); pg-boss is Node; Graphile same |
 | D-4 | Web/API | FastAPI + uvicorn; htmx dashboard | Django (heavier; ORM migration story conflicts with explicit SQL in gatekeeper) |
@@ -549,6 +549,9 @@ We explicitly do *not* design for >100x: PRD economics (small-market frequency c
 | Clock skew (send windows) | all scheduling on DB `now()`; prospect-local windows computed from stored tz | — |
 
 ## 20. Module Layout & Dependency Rules
+
+On disk these modules live under `src/open_reachout/` (standard src-layout
+package; `tests/`, `examples/`, `docs/` at the repository root).
 
 ```
 core/        models, lifecycle, gatekeeper, budget, frequency, suppression,

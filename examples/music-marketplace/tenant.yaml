@@ -1,0 +1,87 @@
+# Reference use case: three-sided music marketplace (PRD Appendix B).
+# sound_tech persona is deliberately absent: it launches only when venue
+# replies show demand (riskiest-assumption gate).
+tenant: stagematch
+
+brief:
+  find: >
+    Small venues - cafes, breweries, wineries, bars - within 50 miles of
+    Austin that host or could host live music, and working bands that play
+    rooms like that.
+  research: >
+    Read their website and event calendar; figure out whether they already
+    book live music, how often, what genres, and who books it. For bands:
+    where they have played recently, genre, and draw signals.
+  goals:
+    convert: venue or band creates a profile
+    brainstorm: adjacent segments, seasonal opportunities, new value-prop angles
+  about_us:
+    name: StageMatch
+    what_we_do: >
+      Free venue accounts; band membership $9/mo; a booking workflow that
+      replaces the Facebook-groups-and-walk-ins grind.
+    links:
+      signup: https://stagematch.test/join
+      ethics: https://stagematch.test/why-you-got-this
+    identity:
+      sender: "Maya Reyes, StageMatch"
+      physical_address: "600 Congress Ave Ste 1400, Austin TX 78701"
+      disclose_automation: true
+  budgets:
+    monthly_prospects: 500
+    monthly_llm_usd: 100
+  autonomy: standard
+
+personas:
+  - id: small_venue
+    description: >
+      Independent cafe, brewery, winery, or bar that hosts (or plausibly
+      could host) live music, booked by an owner or manager, not a talent buyer.
+    evidence_signals: [has_events_calendar, mentions_live_music, independent_owner]
+    value_prop: free curated local acts with a real booking workflow
+    voice: { tone: warm_direct, register: small-business-owner }
+    sequence:
+      steps: 3
+      gaps_days: [4, 7]
+    priority: 10
+    cohorts:
+      - id: austin_venues_2026q3
+        filters: { metro: austin, categories: [cafe, brewery, winery, bar] }
+        monthly_budget: 200
+        sources: [google_places, indie_on_the_move]
+    variants:
+      - id: opener_calendar_hook
+        surface: opener_strategy
+        attributes: { tone: warm, hook: their_calendar, cta: reply_question }
+        prompt: |
+          Write a first-touch email to {{prospect.first_name}}, who books music
+          at {{prospect.org_name}}. Open with a specific, genuine observation
+          about {{evidence.calendar_highlight}} - never generic flattery.
+          Then one sentence on {{persona.value_prop}}. Close with a single
+          easy question about their booking process. {{persona.voice_rules}}
+
+  - id: gigging_band
+    description: >
+      Working band or solo act gigging small rooms in the metro, with recent
+      shows and some web presence (Bandcamp, Instagram, venue calendars).
+    evidence_signals: [recent_local_gigs, has_music_online]
+    value_prop: venue access and gig tools for $9/mo, cancel anytime
+    voice: { tone: peer_to_peer, register: musician }
+    sequence:
+      steps: 3
+      gaps_days: [4, 7]
+    priority: 20
+    cohorts:
+      - id: austin_bands_2026q3
+        filters: { metro: austin }
+        monthly_budget: 300
+        sources: [bandsintown, bandcamp]
+    variants:
+      - id: opener_recent_gig
+        surface: opener_strategy
+        attributes: { tone: peer, hook: recent_gig, cta: signup_link }
+        prompt: |
+          Write a first-touch email to {{prospect.first_name}} of
+          {{prospect.org_name}}. Reference {{evidence.recent_gig}} specifically.
+          One sentence on {{persona.value_prop}}. Offer the signup link
+          {{tenant.links.signup}} with zero pressure. {{persona.voice_rules}}
