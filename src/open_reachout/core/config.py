@@ -32,6 +32,13 @@ class IdentitySpec(_Model):
     )
     physical_address: str = Field(min_length=8)
     disclose_automation: bool = True
+    unsubscribe_text: str = Field(
+        default="Reply STOP and you'll never hear from us again.",
+        min_length=10,
+        description=(
+            "plain-text opt-out line in every message (one-click is provider-side)"
+        ),
+    )
 
 
 class AboutUs(_Model):

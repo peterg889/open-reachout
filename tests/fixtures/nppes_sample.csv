@@ -1,0 +1,7 @@
+NPI,Entity Type Code,Provider Last Name (Legal Name),Provider First Name,Provider Credential Text,Provider First Line Business Practice Location Address,Provider Business Practice Location Address City Name,Provider Business Practice Location Address State Name,Provider Business Practice Location Address Postal Code,Provider Business Practice Location Address Telephone Number,Healthcare Provider Taxonomy Code_1,Healthcare Provider Taxonomy Code_2
+1000000001,1,GARCIA,ELENA,LMFT,100 Oak St,AUSTIN,TX,78701,5125550100,106H00000X,
+1000000002,1,CHEN,MARCUS,LMFT,200 Elm St,DALLAS,TX,75201,2145550100,106H00000X,
+1000000003,2,BRIGHT PATH COUNSELING LLC,,,300 Pine St,AUSTIN,TX,78702,5125550200,106H00000X,
+1000000004,1,OKAFOR,ADAEZE,LPC,400 Peach St,ATLANTA,GA,30303,4045550100,101YP2500X,
+1000000005,1,ROSSI,DANTE,PHD,500 Cedar St,HOUSTON,TX,77002,7135550100,103T00000X,
+1000000006,1,NGUYEN,,LMFT,600 Birch St,AUSTIN,TX,78703,5125550300,106H00000X,

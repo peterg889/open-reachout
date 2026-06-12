@@ -85,7 +85,7 @@ Three containers (`api`, `worker`, `postgres`); `api` is stateless and `worker` 
 | D-3 | Queue | Postgres table + `FOR UPDATE SKIP LOCKED` leases (own ~300-line module, §6) | Celery/Redis (extra stateful infra violates O-3); pg-boss is Node; Graphile same |
 | D-4 | Web/API | FastAPI + uvicorn; htmx dashboard | Django (heavier; ORM migration story conflicts with explicit SQL in gatekeeper) |
 | D-5 | ORM | SQLAlchemy 2.0 Core + typed row mappers; **raw SQL in gatekeeper/counters**; Alembic migrations | Full ORM in hot path obscures locking semantics |
-| D-6 | LLM | `LLMBackend` interface; Anthropic adapter default (Sonnet-class for compose/classify/qualify; Opus-class for weekly discovery); OpenAI-compatible adapter | — |
+| D-6 | LLM | `LLMBackend` interface, BYO provider. **Gemini adapter is the default live backend** (`google-genai`; fast tier for compose/classify/qualify/groundedness, reasoning tier for synthesis/discovery — `gemini-2.5-flash` / `gemini-2.5-pro` defaults, operator-configurable). Anthropic adapter shipped as an alternative (same tier split). | Hard-coding one provider (conflicts with G2/BYO-keys) |
 | D-7 | Sending | Smartlead first, **provider-sequence mode** (see §7.6 — the major impedance-mismatch decision) | Direct SMTP (forbidden by NG6); per-message providers don't exist in cold-email land |
 | D-8 | Blob storage | Postgres (`raw_documents` table, compressed) for scrape snapshots at 0.1 scale; `BlobStore` interface so S3 lands later | S3 from day one (extra credential + infra for ~GBs of data) |
 | D-9 | Observability | OpenTelemetry SDK → OTLP (operator points it anywhere); structlog JSON logs | Prom-only (loses traces); vendor SDKs (lock-in) |

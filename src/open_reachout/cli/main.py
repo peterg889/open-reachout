@@ -79,9 +79,66 @@ def init() -> None:
 
 
 @app.command("dry-run")
-def dry_run(cohort: str = typer.Option(None), n: int = typer.Option(25)) -> None:
+def dry_run(
+    config: Path = typer.Argument(..., help="tenant.yaml path"),  # noqa: B008 — typer idiom
+    n: int = typer.Option(3, help="prospects per cohort"),
+    out: Path = typer.Option(Path("dryrun-review.md")),  # noqa: B008 — typer idiom
+    llm: str = typer.Option("fake", help="fake | gemini (default live backend) | anthropic"),
+    nppes_csv: Path = typer.Option(  # noqa: B008 — typer idiom
+        None, help="NPPES dissemination CSV for nppes-sourced cohorts"
+    ),
+) -> None:
     """Run the pipeline through compose with no sends (FR-1.2)."""
-    _not_yet("M1")
+    from open_reachout.adapters.fakes import FakeEnricher, FakeFinder, FakeSource, FakeVerifier
+    from open_reachout.core import dryrun
+    from open_reachout.core.interfaces import Candidate, DataBasis, SourceAdapter
+
+    cfg = load_tenant(config)
+    ctx = dryrun.validator_context(cfg)
+
+    backend: object
+    if llm == "gemini":
+        from open_reachout.adapters.llm.gemini_backend import GeminiBackend
+
+        backend = GeminiBackend()
+    elif llm == "anthropic":
+        from open_reachout.adapters.llm.anthropic_backend import AnthropicBackend
+
+        backend = AnthropicBackend()
+    else:
+        backend = dryrun.ScriptedLLM(ctx, cfg.brief.about_us.identity.sender)
+
+    sources: dict[str, SourceAdapter] = {}
+    for persona in cfg.personas:
+        for cohort in persona.cohorts:
+            for source_name in cohort.sources:
+                if source_name == "nppes" and nppes_csv:
+                    from open_reachout.adapters.sources.nppes import NppesSource
+
+                    sources[source_name] = NppesSource(nppes_csv)
+                elif source_name not in sources:
+                    sources[source_name] = FakeSource(
+                        [
+                            Candidate(
+                                display_name=f"Sample Prospect{i} ({cohort.id})",
+                                org_name=f"Sample Org {i}",
+                                website="https://example.test",
+                                email_raw=f"prospect{i}@{cohort.id}.example.test",
+                                source_adapter=source_name,
+                                data_basis=DataBasis.GOVERNMENT_PUBLIC,
+                            )
+                            for i in range(n)
+                        ]
+                    )
+
+    report = dryrun.run(
+        cfg, sources, FakeEnricher(), FakeFinder(), FakeVerifier(), backend, n, out  # type: ignore[arg-type]
+    )
+    typer.secho(
+        f"dry-run: {len(report.composed)} drafts, {len(report.disqualified)} disqualified, "
+        f"{len(report.escalated)} escalated -> {out}",
+        fg="green",
+    )
 
 
 @app.command()

@@ -12,20 +12,24 @@ Self-hosted. BYO API keys. Compliance guardrails (CAN-SPAM, volume caps, suppres
 
 ## Status
 
-**M0 (skeleton) in progress.** The pure-logic core is implemented and tested:
-email canonicalization, the prospect state machine, Brief/program config
-schemas with core-constant caps, the typed variable registry with
-trust-classed interpolation, deterministic compliance validators, the
-untrusted-content envelope, the gatekeeper claim orchestration (ordering,
-fail-closed, construction privilege), the Postgres job-queue SQL, the initial
-DB schema with belt-and-braces triggers, FakeProviders, and a CLI whose
-`validate`/`doctor` work today. The first 7 acceptance-gate tests (PRD §10)
-run in CI.
+**M0 complete, M1 in progress.** Implemented and tested: the pure-logic core
+(canonicalization, state machine, config schemas, trust-classed variable
+registry, compliance validators, untrusted-content envelope, gatekeeper claim
+orchestration, job-queue SQL, schema with belt-and-braces triggers), plus the
+M1 pipeline: Thompson-sampling bandit with attribute priors and guardrails,
+the composer (prompt + variables → validated, groundedness-audited draft with
+retry-and-escalate), the qualifier, evidence staleness rules, the NPPES
+source adapter, LLM backends (**Gemini is the default live backend**;
+Anthropic available; both BYO-key, structured-output based), the injection
+corpus running in CI, and a working `reachout dry-run` — the full pipeline
+through compose with zero sends.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
 uv run pytest && uv run pytest -m gates
 reachout validate examples
+reachout dry-run examples/music-marketplace/tenant.yaml --n 3   # fake LLM
+# with a key: pip install -e ".[gemini]" && reachout dry-run ... --llm gemini
 ```
 
 | Doc | Contents |
