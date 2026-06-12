@@ -76,6 +76,16 @@ reachout dry-run examples/music-marketplace/tenant.yaml --n 3   # fake LLM
 | [`docs/engineering-spec.md`](docs/engineering-spec.md) | System architecture & engineering spec: system invariants and their enforcement mechanisms, schema, job system, the Gatekeeper send path, LLM/injection subsystem, stats engine, API surface, compliance subsystems, testing/gate suite, ops, failure-mode analysis |
 | [`research/market-research-report.md`](research/market-research-report.md) | The deep-research report behind the PRD: competitive landscape, compliance/deliverability constraints, build-vs-buy stack, benchmarks — multi-source, adversarially verified, fully cited |
 
+The full prospecting pipeline runs through the worker against Postgres:
+`discover -> enrich -> qualify -> compose -> deliver`, with **entity
+resolution at ingest** — a venue owner who also gigs (same email across two
+personas) resolves to one entity, so the cross-campaign frequency cap and
+suppression apply to the human, not the campaign. Ingest screening drops
+denylisted sources (Psychology Today), suppressed, and forgotten candidates
+before they ever become prospects. The live source/enricher adapters
+(Google Places, Firecrawl) are the only account-bound gap; everything else
+runs today on fakes.
+
 ## Reference use cases (`examples/`, planned)
 
 The framework is dogfooded by two real marketplace businesses whose supply acquisition runs on it:

@@ -272,9 +272,12 @@ def run(
         "fake", help="fake | smtp (send from your own domain via OR_SMTP_MAILBOXES)"
     ),
 ) -> None:
-    """Run the worker: control, classify, and deliver queues (spec 6)."""
+    """Run the worker: discover, enrich, qualify, compose, deliver, classify,
+    control (spec 6). Live sources/enrichers are account-bound; without keys
+    the prospecting queues idle and the worker still serves deliver/classify/
+    control."""
     from open_reachout.adapters.fakes import FakeSendingProvider
-    from open_reachout.core import dryrun, events, sendpath
+    from open_reachout.core import dryrun, events, prospecting, sendpath
     from open_reachout.core.db import engine_from_env
     from open_reachout.core.worker import Worker
 
@@ -297,12 +300,9 @@ def run(
         typer.secho(f"unknown provider {provider!r}", fg="red")
         raise typer.Exit(2)
 
-    contexts = {}
-    senders = {}
-    for f in sorted(config_dir.rglob("tenant.yaml")):
-        cfg = load_tenant(f)
-        contexts[cfg.tenant] = dryrun.validator_context(cfg)
-        senders[cfg.tenant] = cfg.brief.about_us.identity.sender
+    configs = [load_tenant(f) for f in sorted(config_dir.rglob("tenant.yaml"))]
+    contexts = {c.tenant: dryrun.validator_context(c) for c in configs}
+    senders = {c.tenant: c.brief.about_us.identity.sender for c in configs}
 
     backend: object
     if llm == "gemini":
@@ -317,14 +317,21 @@ def run(
         first = next(iter(contexts))
         backend = dryrun.ScriptedLLM(contexts[first], senders[first])
 
-    worker = Worker(
-        engine_from_env(),
-        handlers={
-            "control": events.make_control_handler(sending),  # type: ignore[arg-type]
-            "classify": events.make_classify_handler(backend),  # type: ignore[arg-type]
-            "deliver": sendpath.make_deliver_handler(sending, contexts),  # type: ignore[arg-type]
-        },
-    )
+    engine = engine_from_env()
+    with engine.begin() as conn:
+        runtimes = {c.tenant: prospecting.runtime_for(conn, c) for c in configs}
+    handlers = {
+        "control": events.make_control_handler(sending),  # type: ignore[arg-type]
+        "classify": events.make_classify_handler(backend),  # type: ignore[arg-type]
+        "deliver": sendpath.make_deliver_handler(sending, contexts),  # type: ignore[arg-type]
+        "qualify": prospecting.make_qualify_handler(runtimes, backend),  # type: ignore[arg-type]
+        "compose": prospecting.make_compose_handler(runtimes, backend),  # type: ignore[arg-type]
+    }
+    # discover/enrich need live source + enricher adapters (account-bound).
+    # When configured, register them here; until then those queues simply
+    # have no handler and idle. The deliver/classify/control/qualify/compose
+    # path runs regardless.
+    worker = Worker(engine, handlers=handlers)
     if once:
         processed = worker.drain()
         typer.secho(f"worker: processed {processed} job(s), queues idle", fg="green")

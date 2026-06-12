@@ -19,8 +19,12 @@ from open_reachout.core import queue
 from open_reachout.core.queue import Job
 
 #: Control first (suppression/halt propagation is never queued behind work),
-#: then inbound events, then outbound.
-QUEUE_PRIORITY = ("control", "classify", "deliver", "compose", "enrich", "discover")
+#: then inbound events, then the outbound send, then the prospecting build-up
+#: with later stages ahead of earlier ones so in-flight prospects finish
+#: before new discovery floods the queues.
+QUEUE_PRIORITY = (
+    "control", "classify", "deliver", "compose", "qualify", "enrich", "discover",
+)
 
 Handler = Callable[[Connection, Job], None]
 
